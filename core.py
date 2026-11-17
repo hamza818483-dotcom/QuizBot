@@ -1157,13 +1157,12 @@ def compress_pdf_to_target(file_bytes: bytes, target_bytes: int = 48 * 1024 * 10
 # forwardMessage is server-side (no re-upload), so it carries no size limit
 # at all, and the message the user sees is a normal bot forward, not
 # something sent from the personal/userbot account directly.
-_LARGE_FILE_STORAGE_GROUP = int(os.environ.get("CHAT_ID", "-1004337829983"))
+_LARGE_FILE_STORAGE_GROUP = -1002017050507
 
 
 async def _send_document_via_userbot(chat_id, file_bytes: bytes, filename: str,
                                       caption: str = "", reply_to_message_id: int = None,
-                                      message_thread_id: int = None,
-                                      status_msg_id: int = None) -> Optional[dict]:
+                                      message_thread_id: int = None) -> Optional[dict]:
     """Files over Telegram's 50MB bot-upload cap: upload via the existing
     Telethon USER session (poll_extract.SESSION_STR — same one /delete already
     runs, no new login needed; a real account, not a bot, so Telegram allows
@@ -1178,191 +1177,46 @@ async def _send_document_via_userbot(chat_id, file_bytes: bytes, filename: str,
         return None
     if not _USR_SESSION:
         return None
-    # 2026-11-17 (user report): DM-এ "⏳ PDF পাঠানো হচ্ছে..."-তে আটকে থাকার
-    # মূল কারণ ছিল এখানে কোনো timeout ছিল না -- connect/auth/send_file কোনো
-    # ধাপ hang করলে (স্লো/ডেড নেটওয়ার্ক) পুরো request অনির্দিষ্টকাল await
-    # করত। পুরো ফাংশন এখন একটা hard wall-clock cap-এ wrap করা, timeout হলে
-    # caller-এর normal 50MB error-এ fallback করে (hang করে না)।
-    _USERBOT_FALLBACK_TIMEOUT = 180  # sec -- large (near-2GB) files পুরোপুরি upload+forward করতে যথেষ্ট সময়, কিন্তু অনির্দিষ্টকাল না
-    uclient = None
     try:
         from telethon import TelegramClient
         from telethon.sessions import StringSession
         import io as _io
-
-        # 2026-11-17 (user request): DM-এ "⏳ PDF পাঠানো হচ্ছে..." মেসেজে
-        # elapsed time + % + বাকি সময় estimate আলাদা আলাদা line-এ লাইভ
-        # দেখানো -- Telethon-এর progress_callback(current,total) দিয়ে,
-        # status_msg_id থাকলে edit_msg দিয়ে update করা হয় (প্রতি 5% অথবা
-        # ৩ সেকেন্ড পর পর, বেশি ঘন ঘন edit করে Telegram-এর per-message
-        # edit rate-limit না ছোঁয়ার জন্য)।
-        _upload_t0 = time.time()
-        _last_upd = {"pct": -1, "t": 0.0}
-
-        def _bar(pct):
-            filled = pct // 10
-            return "█" * filled + "░" * (10 - filled)
-
-        def _fmt_secs(s: float) -> str:
-            s = max(0, int(s))
-            m, sec = divmod(s, 60)
-            return f"{m}m {sec}s" if m else f"{sec}s"
-
-        async def _upload_progress(current, total):
-            if not status_msg_id or not total:
-                return
-            pct = int(current * 100 / total)
-            now = time.time()
-            if pct == _last_upd["pct"] or (pct % 5 != 0 and now - _last_upd["t"] < 3):
-                return
-            _last_upd["pct"] = pct
-            _last_upd["t"] = now
-            elapsed = now - _upload_t0
-            eta = (elapsed / current) * (total - current) if current > 0 else 0
-            try:
-                await edit_msg(chat_id, status_msg_id,
-                                f"⏳ PDF পাঠানো হচ্ছে...\n"
-                                f"{_dest_label(chat_id)}\n"
-                                f"[{_bar(pct)} {pct}%]\n"
-                                f"⏱️ Elapsed: {_fmt_secs(elapsed)}\n"
-                                f"⏳ বাকি (আনুমানিক): {_fmt_secs(eta)}")
-            except Exception:
-                pass
-
-        async def _do_upload():
-            nonlocal uclient
-            uclient = TelegramClient(StringSession(_USR_SESSION), _USR_API_ID, _USR_API_HASH)
-            # 2026-11-17 (user report): a single connect() ConnectError
-            # (transient MTProto connect blip -- common on HF/Render's
-            # outbound network) was falling straight through to the normal
-            # 50MB error with zero retry. Retry connect a few times with a
-            # short backoff before giving up -- cheap, and the common case
-            # (one-off blip) now self-heals instead of failing the whole
-            # userbot fallback outright.
-            _last_connect_err = None
-            for _attempt in range(3):
-                try:
-                    await uclient.connect()
-                    _last_connect_err = None
-                    break
-                except Exception as _ce:
-                    _last_connect_err = _ce
-                    logger.warning(f"[sendDoc] userbot connect attempt {_attempt+1}/3 failed: {_ce}")
-                    if _attempt < 2:
-                        await asyncio.sleep(1.5 * (_attempt + 1))
-            if _last_connect_err is not None:
-                raise _last_connect_err
-            if not await uclient.is_user_authorized():
-                await uclient.disconnect()
-                return None
-            buf = _io.BytesIO(file_bytes)
-            buf.name = filename
-            stored = await uclient.send_file(
-                _LARGE_FILE_STORAGE_GROUP, buf,
-                caption=caption or None,
-                force_document=True,
-                progress_callback=_upload_progress,
-            )
+        uclient = TelegramClient(StringSession(_USR_SESSION), _USR_API_ID, _USR_API_HASH)
+        await uclient.connect()
+        if not await uclient.is_user_authorized():
             await uclient.disconnect()
-            uclient = None
-            size_mb = len(file_bytes) / 1024 / 1024
+            return None
+        buf = _io.BytesIO(file_bytes)
+        buf.name = filename
+        stored = await uclient.send_file(
+            _LARGE_FILE_STORAGE_GROUP, buf,
+            caption=caption or None,
+            force_document=True,
+        )
+        await uclient.disconnect()
+        size_mb = len(file_bytes) / 1024 / 1024
 
-            # Bot-side forward: server copies the message, no size limit at all.
-            fwd = await tg_post("forwardMessage", {
-                "chat_id": str(chat_id),
-                "from_chat_id": str(_LARGE_FILE_STORAGE_GROUP),
-                "message_id": stored.id,
-            })
-            if not fwd.get("ok"):
-                logger.warning(f"[sendDoc] userbot uploaded ({size_mb:.1f}MB) but bot forward failed: {fwd}")
-                return None
-            logger.info(f"[sendDoc] {size_mb:.1f}MB file: userbot→storage-group, bot forwarded to {chat_id} (50MB cap bypassed)")
-            fwd["_via"] = "userbot+forward"
-            return fwd
-
-        return await asyncio.wait_for(_do_upload(), timeout=_USERBOT_FALLBACK_TIMEOUT)
-    except asyncio.TimeoutError:
-        logger.warning(f"[sendDoc] userbot fallback timed out after {_USERBOT_FALLBACK_TIMEOUT}s -- aborting, caller will show the normal 50MB error instead of hanging")
-        return None
+        # Bot-side forward: server copies the message, no size limit at all.
+        fwd = await tg_post("forwardMessage", {
+            "chat_id": str(chat_id),
+            "from_chat_id": str(_LARGE_FILE_STORAGE_GROUP),
+            "message_id": stored.id,
+        })
+        if not fwd.get("ok"):
+            logger.warning(f"[sendDoc] userbot uploaded ({size_mb:.1f}MB) but bot forward failed: {fwd}")
+            return None
+        logger.info(f"[sendDoc] {size_mb:.1f}MB file: userbot→storage-group, bot forwarded to {chat_id} (50MB cap bypassed)")
+        fwd["_via"] = "userbot+forward"
+        return fwd
     except Exception as e:
         logger.warning(f"[sendDoc] userbot fallback failed: {e}")
         return None
-    finally:
-        if uclient is not None:
-            try:
-                await uclient.disconnect()
-            except Exception:
-                pass
-
-
-def _dest_label(chat_id) -> str:
-    """Human-readable destination line for the progress message -- shows
-    exactly where the file is headed (DM/group/channel id)."""
-    return f"📍 Destination: <code>{chat_id}</code>"
 
 
 async def send_document(chat_id, file_bytes: bytes, filename: str,
                         caption: str = "", mime_type="application/octet-stream",
                         reply_to_message_id: int = None, parse_mode: str = "HTML",
-                        message_thread_id: int = None, reply_markup: dict = None,
-                        status_msg_id: int = None) -> dict:
-    # 2026-11-17 (user request): every send_document call now (a) shows the
-    # destination chat_id as its own line under the progress message, and
-    # (b) on failure, pushes the root cause straight to the owner's DM via
-    # notify_owner -- regardless of whether the file went through the
-    # ≤50MB direct path or the >50MB userbot fallback.
-    _t0 = time.time()
-    _ticker_task = None
-    if status_msg_id:
-        async def _tick():
-            while True:
-                await asyncio.sleep(3)
-                try:
-                    await edit_msg(chat_id, status_msg_id,
-                                    f"⏳ PDF পাঠানো হচ্ছে...\n"
-                                    f"{_dest_label(chat_id)}\n"
-                                    f"⏱️ Elapsed: {_fmt_elapsed(time.time() - _t0)}")
-                except Exception:
-                    pass
-        # Only the plain elapsed-timer ticker here -- the >50MB userbot path
-        # overrides this with its own real per-chunk % progress below, so
-        # this ticker is cancelled the moment that path takes over.
-        if len(file_bytes) <= 50 * 1024 * 1024:
-            _ticker_task = asyncio.create_task(_tick())
-    try:
-        result = await _send_document_impl(
-            chat_id, file_bytes, filename, caption, mime_type,
-            reply_to_message_id, parse_mode, message_thread_id, reply_markup,
-            status_msg_id,
-        )
-    finally:
-        if _ticker_task:
-            _ticker_task.cancel()
-    if not result.get("ok", True) or result.get("error"):
-        _reason = result.get("error") or result.get("description") or "unknown error"
-        try:
-            await notify_owner(
-                f"❌ <b>send_document ব্যর্থ</b>\n"
-                f"{_dest_label(chat_id)}\n"
-                f"📄 File: <code>{filename}</code> ({len(file_bytes)/1024/1024:.1f}MB)\n"
-                f"🔍 Root cause: <code>{_reason}</code>"
-            )
-        except Exception:
-            pass
-    return result
-
-
-def _fmt_elapsed(s: float) -> str:
-    s = max(0, int(s))
-    m, sec = divmod(s, 60)
-    return f"{m}m {sec}s" if m else f"{sec}s"
-
-
-async def _send_document_impl(chat_id, file_bytes: bytes, filename: str,
-                        caption: str = "", mime_type="application/octet-stream",
-                        reply_to_message_id: int = None, parse_mode: str = "HTML",
-                        message_thread_id: int = None, reply_markup: dict = None,
-                        status_msg_id: int = None) -> dict:
+                        message_thread_id: int = None, reply_markup: dict = None) -> dict:
     if caption and len(caption) > 1024:
         caption = caption[:1021] + "..."
 
@@ -1382,7 +1236,6 @@ async def _send_document_impl(chat_id, file_bytes: bytes, filename: str,
         userbot_r = await _send_document_via_userbot(
             chat_id, file_bytes, filename, caption,
             reply_to_message_id=reply_to_message_id,
-            status_msg_id=status_msg_id,
             message_thread_id=message_thread_id,
         )
         if userbot_r is not None:

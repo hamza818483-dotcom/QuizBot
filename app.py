@@ -928,7 +928,7 @@ _current_job_chat_id_ctx = contextvars.ContextVar("_current_job_chat_id_ctx", de
 # contextvars only propagate correctly through await-chains when both sides
 # reference the SAME ContextVar object, not two separately-created vars
 # with the same name/default.
-from pdf_handler import _qbm_key_offset_ctx, _qbm_page_used_accounts_ctx, _qbm_page_gemini_info_ctx
+from pdf_handler import _qbm_key_offset_ctx, _qbm_page_used_accounts_ctx
 
 def is_cancelled(chat_id=None):
     if chat_id is None:
@@ -994,9 +994,6 @@ CHANNEL_RENAME_PENDING = {}  # uid -> channel_id awaiting new name text
 RAPID_PENDING = {}
 # job_id -> asyncio.Task (so a scheduled /rapid run can be cancelled before it fires)
 RAPID_TASKS = {}
-
-# /prompt — uid -> {"key": registry-key, "msg_id": full-prompt message_id awaiting reply-edit}
-PROMPT_EDIT_PENDING = {}
 
 # v1.3: /api/new-exam — async job state for instant progress page
 # job_id -> {"status": "running"|"done"|"error", "pct": int, "eta_sec": int,
@@ -5501,17 +5498,7 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
                 logger.warning(f"[AI-ROT] {model} HTTP 200 but EMPTY content (finish_reason={finish_reason}): {json.dumps(j)[:300]}")
             return content, r.status_code
     except Exception as e:
-        # 2026-11-17 FIX: some httpx exceptions (ReadTimeout, ConnectError
-        # wrapping a lower-level socket error, etc.) have an EMPTY str(e),
-        # so "err: " with nothing after it told us nothing about the real
-        # cause and made every network failure indistinguishable from a
-        # dead key. Log the exception TYPE + repr always, plus a trimmed
-        # traceback, so a timeout vs DNS failure vs connection-reset is
-        # actually visible in [Groq-QBM] key-failed logs going forward.
-        logger.warning(
-            f"[AI-ROT] {model} err: {type(e).__name__}: {e!r}"
-        )
-        logger.debug(f"[AI-ROT] {model} full traceback:\n{traceback.format_exc()}")
+        logger.warning(f"[AI-ROT] {model} err: {e}")
         return "", 0
 
 _key_exhausted_day: Dict[str, str] = {}   # key -> 'YYYY-MM-DD' (BD) it was marked exhausted
@@ -7303,7 +7290,7 @@ def _dedupe_mcqs(mcqs: list) -> list:
     """DISABLED: dedup inactivated to stop false-positive MCQ drops. No-op passthrough."""
     return list(mcqs or [])
 
-async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0, custom_prompt: str = None, gemini_only: bool = True):
+async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0, custom_prompt: str = None, gemini_only: bool = False):
     """
     Smart wrapper: Gemini first (primary), then Groq fallback (internal key rotation via pdf_handler).
     On failure → rotate through NVIDIA / OpenRouter Qwen VL / Nemotron / Gemma.
@@ -7932,7 +7919,7 @@ def _cap_mcq_options(mcqs: list, max_opts: int = 4) -> list:
     return mcqs
 
 
-async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0, custom_prompt: str = None, gemini_only: bool = True):
+async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0, custom_prompt: str = None, gemini_only: bool = False):
     # 2026-08-19: Gemini is now PRIMARY for ALL modes (explicit user
     # preference), Groq is fallback only when Gemini fails/empty. Previously
     # (2026-08-07) Groq was made primary because Gemini's free-tier daily
@@ -10430,15 +10417,10 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
             f"💎 {len(mcqs)} MCQ\n\n"
             f"📌 Format: questions, option1-5, answer(numeric), explanation, type, section"
         )
-        # 2026-11-17 (user request): final CSV replies to the ORIGINAL
-        # image message, not just a bare send -- makes it obvious which
-        # image each CSV came from, especially useful when several
-        # /img jobs are running in the same chat.
         await send_document(
             chat_id, csv_content,
             f"ATLAS_{topic or 'MCQ'}.csv",
-            caption=csv_caption, mime_type="text/csv",
-            reply_to_message_id=img_data.get("msg_id")
+            caption=csv_caption, mime_type="text/csv"
         )
     except Exception as csv_err:
         logger.warning(f"[IMG] CSV auto-send failed: {csv_err}")
@@ -11910,40 +11892,6 @@ def _format_mcq_answer_cell(m: dict, opts: list) -> tuple:
             texts.append(opts[i])
     return "5", "+".join(texts)
 
-def _dedup_mcqs_exact(mcqs: list) -> tuple:
-    """2026-11-17 (user request): drop EXACT duplicate MCQs (question text +
-    ALL options identical after whitespace/case normalization) right before
-    the final CSV is written -- this is the one place every /qbm-family
-    extraction path (page-level, call1/call2, retries) converges, so it
-    catches duplicates regardless of which stage re-introduced them.
-
-    Deliberately EXACT match only, never fuzzy -- page-level fuzzy dedup
-    (_qbm_dedup_list, threshold=0.93) was disabled earlier after it started
-    dropping genuinely different MCQs that only looked similar (same bare
-    stem, different options; same subject/chapter wording). An exact-match
-    check on question+options together can never make that mistake: it only
-    ever removes rows that are byte-for-byte the same MCQ, never a
-    near-miss. Keeps the FIRST occurrence (preserves original page order /
-    topic-segment boundaries), drops every later exact repeat.
-    Returns (deduped_list, dropped_count)."""
-    seen = set()
-    out = []
-    dropped = 0
-    for m in mcqs:
-        q = re.sub(r"\s+", " ", str(m.get("question", "")).strip().lower())
-        opts_raw = m.get("options") or []
-        opts = [re.sub(r"\s+", " ", str(o).strip().lower()) for o in opts_raw]
-        key = q + "||" + "|".join(opts)
-        if q and key in seen:
-            dropped += 1
-            continue
-        seen.add(key)
-        out.append(m)
-    if dropped:
-        logger.warning(f"[CSV-dedup] dropped {dropped} exact-duplicate MCQ(s) before final CSV write")
-    return out, dropped
-
-
 async def _mcqs_to_csv_bytes(mcqs: list) -> tuple:
     """MCQ list → (csv_bytes, meta). NEW dual-purpose style: writes 'topic'/
     'subtopic' columns, filling them in only on the row where a segment
@@ -11967,7 +11915,6 @@ async def _mcqs_to_csv_bytes(mcqs: list) -> tuple:
     unpack it.
     """
     mcqs = await _ensure_explanations_before_csv(mcqs)
-    mcqs, _dup_dropped = _dedup_mcqs_exact(mcqs)
     import io, csv as csv_mod_local
     buf = io.StringIO()
     w = csv_mod_local.writer(buf)
@@ -12001,8 +11948,7 @@ async def _mcqs_to_csv_bytes(mcqs: list) -> tuple:
             ans_cell, _strip_img_tag(m.get("explanation", "")), "1", "1",
             topic_cell, subtopic_cell
         ])
-    meta = {"underline_qnos": underline_qnos, "multi_answer_qnos": multi_answer_qnos,
-            "dup_dropped": _dup_dropped}
+    meta = {"underline_qnos": underline_qnos, "multi_answer_qnos": multi_answer_qnos}
     return buf.getvalue().encode("utf-8-sig"), meta
 
 
@@ -12711,8 +12657,7 @@ async def _handle_cut_pdf_command_inner(msg: dict):
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id, "⏳ PDF পাঠানো হচ্ছে...")
             send_res = await send_document(chat_id, out_bytes, out_name,
-                                 caption=f"✂️ Page {start_page}-{end_page} ({end_page - start_page + 1} পাতা)",
-                                 status_msg_id=status_msg_id)
+                                 caption=f"✂️ Page {start_page}-{end_page} ({end_page - start_page + 1} পাতা)")
             if not send_res.get("ok"):
                 err = send_res.get("error") or send_res.get("description") or "unknown error"
                 logger.error(f"[Cut] send_document failed: {err}")
@@ -19848,12 +19793,12 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
     pct = int(done / total * 100) if total else 0
     bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
     lines = [
-        "⏳ ATLAS PDF Processing...",
+        "⏳ <b>ATLAS PDF Processing...</b>",
         "━━━━━━━━━━━━━━━━━━━━━━",
-        f"📄 File: {_html_escape(str(file_name))}", f"🎯 Topic: {_html_escape(str(topic))}", f"📋 Pages: {total} total",
+        f"📄 File: {file_name}", f"🎯 Topic: {topic}", f"📋 Pages: {total} total",
     ]
     if live_topic:
-        lines.append(f"📂 Current topic: {_html_escape(str(live_topic))}")
+        lines.append(f"📂 Current topic: {live_topic}")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     for s in page_status:
         if s["done"]:
@@ -19861,21 +19806,21 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
                 err = (s.get("error") or "").strip()
                 err_short = (err[:80] + "…") if len(err) > 80 else err
                 if err_short:
-                    lines.append(f"⚠️ Page {fmt_page(s['page'])}: 0 MCQ — {_html_escape(err_short)}")
+                    lines.append(f"⚠️ Page {fmt_page(s['page'])}: 0 MCQ — {err_short}")
                 else:
                     lines.append(f"⚠️ Page {fmt_page(s['page'])}: 0 MCQ (কারণ অজানা — retry/log চেক করুন)")
             else:
                 model_tag = s.get("model", "")
-                model_str = f" ({_html_escape(model_tag)})" if model_tag else ""
+                model_str = f" ({model_tag})" if model_tag else ""
                 page_topic = s.get("detected_topic", "")
-                topic_str = f" 📂{_html_escape(page_topic)}" if page_topic else ""
+                topic_str = f" 📂{page_topic}" if page_topic else ""
                 secs_gen = s.get("gen_seconds")
                 secs_str = f" ⏱{secs_gen}s" if secs_gen is not None else ""
                 calls_n = s.get("req_calls", 0)
                 calls_str = f" 🤖{calls_n}" if calls_n is not None else ""
                 _g_acct = s.get("gemini_account")
                 _g_att = s.get("gemini_attempt")
-                acct_str = f" 🔑{_html_escape(str(_g_acct))}#{_g_att}" if _g_acct else ""
+                acct_str = f" 🔑{_g_acct}#{_g_att}" if _g_acct else ""
                 lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ{model_str}{topic_str}{secs_str}{calls_str}{acct_str} ✓")
         elif s["current"]:
             _stage = s.get("stage") or "Processing..."
@@ -19883,7 +19828,7 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
             _live_secs = int(time.time() - _pg_start) if _pg_start else 0
             _calls_now = s.get("req_calls", 0)
             _calls_now_str = f" 🤖{_calls_now}" if _calls_now is not None else ""
-            lines.append(f"⏳ Page {fmt_page(s['page'])}: {_html_escape(str(_stage))} ⏱{_live_secs}s{_calls_now_str}")
+            lines.append(f"⏳ Page {fmt_page(s['page'])}: {_stage} ⏱{_live_secs}s{_calls_now_str}")
         else:
             lines.append(f"⬜ Page {fmt_page(s['page'])}: Waiting")
     lines += [
@@ -19897,15 +19842,11 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
         lines.append("━━━━━━━━━━━━━━━━━━━━━━")
         lines.append("📂 Topic-wise:")
         for t_name, t_count in topic_breakdown.items():
-            lines.append(f"  • {_html_escape(str(t_name))}: {t_count} MCQ")
+            lines.append(f"  • {t_name}: {t_count} MCQ")
     if ai_calls is not None:
-        _breakdown_str = f" ({_html_escape(str(ai_calls_breakdown))})" if ai_calls_breakdown else ""
+        _breakdown_str = f" ({ai_calls_breakdown})" if ai_calls_breakdown else ""
         lines.append(f"🔥 মোট request (exact): {ai_calls}{_breakdown_str}")
-    # 2026-11-16 (user request): wrap the ENTIRE dashboard in one continuous
-    # <pre> box -- a single unified border around the whole message (not
-    # just the page-list section), rendered as Telegram's monospace
-    # code-block. The internal ━━━ section dividers stay as-is inside it.
-    return "<pre>" + "\n".join(lines) + "</pre>"
+    return "\n".join(lines)
 
 def _build_dashboard_md(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=None, ai_calls_breakdown=None, topic_breakdown=None, live_topic=None):
     """_build_dashboard-er markdown/table version -- sendRichMessage/
@@ -19977,7 +19918,7 @@ def _build_dashboard_v(file_name, topic, pages, page_status, start_time, total_m
     base = _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0,
                             ai_calls=ai_calls, ai_calls_breakdown=ai_calls_breakdown, live_topic=live_topic)
     sep = "━━━━━━━━━━━━━━━━━━━━━━"
-    now = ["🔴 Now:"]
+    now = ["🔴 <b>Now:</b>"]
     running = [s_ for s_ in page_status if s_.get("current") and not s_["done"]]
     for s_ in running:
         t0 = s_.get("page_start_time")
@@ -19998,16 +19939,28 @@ def _build_dashboard_v(file_name, topic, pages, page_status, start_time, total_m
 
 
 async def _update_pdf_dashboard(chat_id, message_id, *dash_args, reply_markup=None, **dash_kwargs):
-    """Shared dashboard-update helper for all /pdf-family dashboard updates.
-    2026-11-17 (user request): /pdf's dashboard now always renders the same
-    <pre> monospace box /qbm already uses (via _build_dashboard), in DM and
-    group/channel alike -- previously DM used a separate rich-table style
-    (edit_rich_msg + _build_dashboard_md) that looked different from /qbm's.
-    Same underlying data either way (file/topic/pages, per-page MCQ+model+
-    🔑account#attempt tag, progress/elapsed/AI-call totals) -- only the
-    visual box style changes here."""
-    html_text = _build_dashboard(*dash_args, **dash_kwargs)
-    return await edit_msg(chat_id, message_id, html_text, reply_markup=reply_markup)
+    """Shared dashboard-update helper: DM (chat_id > 0) -> rich table via
+    edit_rich_msg (auto-falls back to plain HTML edit_msg on any error).
+    Group/channel (chat_id < 0) -> existing plain HTML edit_msg unchanged.
+    Single call-site swap point for all /pdf-family dashboard updates."""
+    if chat_id > 0:
+        md_text = _build_dashboard_md(*dash_args, **dash_kwargs)
+        fallback = _build_dashboard(*dash_args, **dash_kwargs)
+        result = await edit_rich_msg(chat_id, message_id, md_text, fallback_text=fallback)
+        # sendRichMessage/rich edit doesn't accept reply_markup directly --
+        # if buttons are needed, re-apply them via a lightweight follow-up
+        # editMessageReplyMarkup call so regen buttons still work in DM.
+        if reply_markup is not None:
+            try:
+                await tg_post("editMessageReplyMarkup", {
+                    "chat_id": chat_id, "message_id": message_id, "reply_markup": reply_markup
+                })
+            except Exception as e:
+                logger.warning(f"[RichMsg] editMessageReplyMarkup failed: {e}")
+        return result
+    else:
+        html_text = _build_dashboard(*dash_args, **dash_kwargs)
+        return await edit_msg(chat_id, message_id, html_text, reply_markup=reply_markup)
 
 def _pair_pages_for_extra(pages: list) -> list:
     """Combine consecutive pages 2-at-a-time into a single vertically-
@@ -22469,12 +22422,12 @@ QBM_PROMPT_VERSION = 5
 QBM_EXTRACT_PROMPT_DEFAULT = """STRICT MCQ EXTRACTOR. Extract ONLY MCQs already on this page — never invent, never skip. 0 MCQs→[]. N MCQs→exactly N.
 
 RULES:
-- Never emit the SAME MCQ (identical question text AND identical options) more than once in your output, even if it visually appears to repeat on the page -- each distinct serial number on the page is exactly one MCQ in your output, never duplicated.
 - Multi-column: COLUMN-MAJOR order (finish left column top-to-bottom, then next). Never zigzag.
 - Never guess without source proof. Never reword question/options (strip only numbering like ১./1./Q1./ক.). Never translate.
 - Synonym/antonym MCQs (প্রতিশব্দ/সমার্থক/বিপরীত or "synonym/antonym of"): question+options stay 100% English, no Bangla gloss added anywhere.
 - 3+ read-throughs; verify count matches visible MCQs; don't miss the last one per column.
-- Spelling fix (verify char-by-char): any word — Bangla or English — that is spelled wrong, or that looks glyph-similar to the correct word but doesn't actually fit the surrounding question/options/answer/overall MCQ meaning, gets auto-corrected to whichever real word is the best contextual fit (using the surrounding text + options + answer + the MCQ's overall subject as evidence). Never change meaning, and never guess a replacement that doesn't genuinely fit the context just because it looks visually close.
+- Fix obvious spelling errors without changing meaning; verify char-by-char.
+- OCR confusion pairs — check against these: বসতি≠বৃষ্টি, প্রাচীন≠প্রাচীর, দক্ষিণ≠রক্ষণ, রাজধানী≠রাজবাড়ী, সীমান্ত≠সিমেন্ট, অবস্থান≠অবস্থা, বিভাগ≠বিভাজন, জনসংখ্যা≠জনসংখ্যক, স্বাধীনতা≠সাধারণত, কর্তৃক≠কর্তব্য. Re-check glyph shape before committing.
 - Never truncate — question/options end only at proper punctuation (?।); compare length vs source.
 - Hard-to-read word/name: infer full word from context/partial letters/general knowledge, never leave blank.
 - Question unclear but options readable: infer question type from options + general knowledge.
@@ -22507,17 +22460,11 @@ Never mix LaTeX+Unicode in one MCQ. Exception: only a genuinely unrepresentable 
 
 FORBIDDEN SOURCE-REFERENCE PHRASES (question+explanation): never say WHERE info lives (চিত্রে/বক্সে/ছকে/উদ্দীপকে/সারণিতে/পৃষ্ঠায়/প্যাসেজে/অনুচ্ছেদে/গ্রাফে/"দেখা যাচ্ছে"/"বলা আছে"/"প্রদত্ত"/English "as shown in figure/table/passage"/"mentioned in text") — always state the fact directly, as general knowledge. Structural rule: any container-pointing phrase forbidden regardless of wording.
 
+DIAGRAM: question needs a diagram to understand → add "qsn_bbox":[x1,y1,x2,y2] (0-1000 scale) covering entire diagram+labels+arrows edge-to-edge, small margin. Caption like "চিত্র: G"/"Figure 1" near question = proof diagram exists → bbox required. Omit if none. Options never get bbox.
+
 OUTPUT: valid JSON array only, no extra text/markdown. No MCQ → [].
-[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"..."}]
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]
 """
-# 2026-11-17 (user request): qsn_bbox (question-diagram crop) feature
-# disabled for /qbm -- DIAGRAM instruction + qsn_bbox removed from the
-# output schema so the model is never asked for it. All downstream
-# bbox-handling code (restore_opt_bboxes, recover_missed_diagram_bbox,
-# the figure-caption recovery batch call, etc.) is left in place
-# untouched/unused rather than deleted, in case this needs to be
-# re-enabled later -- it simply never triggers now since mc.get("qsn_bbox")
-# is always None/absent from here on.
 
 
 # 2026-11-14 (user request): /qbm specifically doesn't need any explanation
@@ -22577,11 +22524,10 @@ EXPLANATION (max 190 chars Bengali unless verbatim source text): if page has exp
 
 MATH/CHEMISTRY: never raw LaTeX — use Unicode (H₂O, x², √x, Na⁺, °C, × not x, etc).
 
+QUESTION needs a diagram to understand → add "qsn_bbox":[x1,y1,x2,y2] (0-1000 scale) covering the diagram. Omit if none.
+
 OUTPUT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].
-[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"..."}]"""
-# 2026-11-17 (user request): qsn_bbox disabled here too for consistency,
-# though this Groq-only compact prompt rarely fires anymore now that
-# gemini_only=True is the default everywhere in /qbm.
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]"""
 
 
 TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
@@ -23096,7 +23042,7 @@ async def _topic_extract_from_image(img, cache_key: tuple = None) -> list:
         if cached:
             logger.info(f"[TOPIC MCQ Cache] hit for {cache_key} — skipping Call1, still running full Call2 verify")
             return _qbm_dedup_list(cached)
-        gem = await _qbm_gemini_extract(img, await prompt_get_active("topic"))
+        gem = await _qbm_gemini_extract(img, TOPIC_EXTRACT_PROMPT)
         result = _qbm_dedup_list(gem) if gem else []
         if result and cache_key:
             _topic_mcq_result_cache[cache_key] = result
@@ -23216,7 +23162,7 @@ async def _eng_extract_from_image(img, cache_key: tuple = None) -> list:
         if cached:
             logger.info(f"[ENG MCQ Cache] hit for {cache_key} — skipping Call1, still running full Call2 verify")
             return _qbm_dedup_list(cached)
-        gem = await _qbm_gemini_extract(img, await prompt_get_active("eng"))
+        gem = await _qbm_gemini_extract(img, ENG_EXTRACT_PROMPT)
         result = _qbm_dedup_list(gem) if gem else []
         if result and cache_key:
             _eng_mcq_result_cache[cache_key] = result
@@ -23462,8 +23408,7 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None, bypass_cache:
         # 2026-09-01) — ~150 Gemini keys available so no need to leak into
         # other providers; also avoids wasted calls when OpenRouter's daily
         # quota is already fully exhausted.
-        _unmesh_base_prompt = await prompt_get_active("unmesh")
-        _prompt = _unmesh_base_prompt + _QBM_CAREFUL_SCAN_ADDENDUM if careful else _unmesh_base_prompt
+        _prompt = UNMESH_EXTRACT_PROMPT + _QBM_CAREFUL_SCAN_ADDENDUM if careful else UNMESH_EXTRACT_PROMPT
         gem_txt = await _qbm_gemini_raw_only(img, _prompt, careful=careful)
         gem = _qbm_parse_json(gem_txt) if gem_txt else []
         result = _qbm_dedup_list(gem) if gem else []
@@ -23778,8 +23723,7 @@ async def _bcs_extract_from_image(img, cache_key: tuple = None, bypass_cache: bo
         logger.info(f"[BCS MCQ Cache] hit for {cache_key} — skipping extraction call")
         return _qbm_dedup_list(cached)
 
-    _bcs_base_prompt = await prompt_get_active("bcs")
-    _prompt1 = _bcs_base_prompt + _QBM_CAREFUL_SCAN_ADDENDUM if careful else _bcs_base_prompt
+    _prompt1 = BCS_EXTRACT_PROMPT_CALL1 + _QBM_CAREFUL_SCAN_ADDENDUM if careful else BCS_EXTRACT_PROMPT_CALL1
     gem_txt = await _qbm_gemini_raw_only(img, _prompt1, careful=careful)
     gem = _qbm_parse_json(gem_txt) if gem_txt else []
     result = _qbm_dedup_list(gem) if gem else []
@@ -25099,7 +25043,7 @@ def _parse_chem_heading_scan(text: str) -> list:
     return headings
 
 
-async def _chem_extract_from_image(img, cache_key: tuple = None, gemini_only: bool = True) -> list:
+async def _chem_extract_from_image(img, cache_key: tuple = None, gemini_only: bool = False) -> list:
     """/chem extractor — same Call1+Call2 pipeline as /topic and /unmesh, but
     topic boundaries are detected via the BOLD-BLACK-LARGER-FONT + Bangla
     hierarchical-number-prefix (১.২, ১.২.১, ২.২.১...) heading style
@@ -25117,8 +25061,7 @@ async def _chem_extract_from_image(img, cache_key: tuple = None, gemini_only: bo
         if cached:
             logger.info(f"[CHEM MCQ Cache] hit for {cache_key} — skipping Call1, still running full heading-scan + Call2 verify")
             return _qbm_dedup_list(cached)
-        _chem_base_prompt = await prompt_get_active("chem")
-        gem = await _qbm_gemini_extract(img, _chem_base_prompt, gemini_only=gemini_only)
+        gem = await _qbm_gemini_extract(img, CHEM_EXTRACT_PROMPT, gemini_only=gemini_only)
         if gem:
             result = _qbm_dedup_list(gem)
             if result and cache_key:
@@ -25136,7 +25079,7 @@ async def _chem_extract_from_image(img, cache_key: tuple = None, gemini_only: bo
                 _chem_mcq_result_cache[cache_key] = result
                 _cap_qbm_mcq_cache(_chem_mcq_result_cache)
             return result
-        txt3 = await _qbm_openrouter_call(img, _chem_base_prompt)
+        txt3 = await _qbm_openrouter_call(img, CHEM_EXTRACT_PROMPT)
         result3 = _qbm_parse_json(txt3) if txt3 else []
         return _qbm_dedup_list(result3)
 
@@ -25276,7 +25219,7 @@ async def _chem_extract_from_image(img, cache_key: tuple = None, gemini_only: bo
     return mcqs
 
 
-async def _chem_generate_from_image(img, cache_key: tuple = None, gemini_only: bool = True) -> list:
+async def _chem_generate_from_image(img, cache_key: tuple = None, gemini_only: bool = False) -> list:
     """/chem GENERATION function (creates NEW MCQs from page content, does
     NOT extract existing ones) — same generation engine as /pdf's default
     mode, via _build_chem_gen_prompt, PLUS the same independent heading-scan
@@ -25834,7 +25777,7 @@ def _chem_flag_letter_ref_explanations(mcqs: list, page_num) -> None:
             )
 
 
-async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, status_msg_id: int = None, gemini_only: bool = True, file_name: str = "") -> list:
+async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, status_msg_id: int = None, gemini_only: bool = False, file_name: str = "") -> list:
     """/chem GENERATION pipeline, rebuilt 2026-08-20 to mirror /bio's
     _bio_generate_per_topic_pages architecture exactly: Call 1 (batched
     heading-scan, ~1 per 3 pages) detects topic segment boundaries via
@@ -27028,104 +26971,7 @@ async def _qbm_openrouter_call(img, prompt: str) -> str:
     return ""
 
 
-# QBM Call2's miss-check step text, only included in the prompt when
-# do_miss_check=True (normal path -- /prompt's view always shows it present).
-QBM_CALL2_STEP_A_TEXT = """STEP A — MISS-CHECK (mandatory, full-image scan every time):
-1) Look at the ENTIRE page image now, independent of the list below — mentally divide it into
-   regions (top/middle/bottom, left/right if multi-column) and scan EACH region for any MCQ
-   block that exists on the page. Do NOT limit your scan to areas "near" the MCQs already in the
-   list — a page can have missed MCQs anywhere, including entirely separate regions the list
-   below doesn't cover at all (this list is only PART of the page's MCQs when the page has more
-   MCQs than fit in one verification chunk).
-2) For every MCQ block you find on the page, check: is it already present in the list below
-   (same question)? If NOT present, it was MISSED — add it in the SAME strict format (options in
-   the exact source position order, A/B/C/D slots by position — never relabeled/sorted). If it
-   belongs under a passage/উদ্দীপক, prepend that passage's full text to its question
-   (self-contained), same as Call 1's rule. CRITICAL — SERIAL POSITION: insert each missed MCQ at
-   its CORRECT position in the output list based on where it actually sits on the page relative to
-   the MCQs already in the list below (reading order: top-to-bottom, left-to-right/column-major)
-   — never append all missed MCQs to the end of the list regardless of where they belong on the
-   page. A missed MCQ that sits between question 3 and question 4 on the page must land between
-   them in the output, not after the last one.
-3) Pay special attention to the LAST MCQ on the page and the BOTTOM of the page — most commonly
-   missed — but this is in ADDITION to the full scan above, not instead of it.
-4) CRITICAL — DO NOT INVENT: only add an MCQ here if it is ACTUALLY, VISIBLY present on this
-   exact page image as a real question+options block. Never create, guess, infer, or hallucinate
-   an MCQ that is not literally printed on the page — when in doubt, leave it out. Adding zero
-   missed MCQs is the common and expected outcome; a wrong "missed" MCQ is worse than missing one.
-
-"""
-
-# QBM Call2 (miss-check + full verification, merged single call). Template
-# with {mcq_json}/{task_line}/{step_a_text} placeholders filled in by
-# _qbm_call2_single -- lets /prompt show and let admins edit this prompt,
-# same as Call1's QBM_EXTRACT_PROMPT_DEFAULT.
-QBM_CALL2_PROMPT_DEFAULT = """You already extracted these MCQs from this exact page image (Call 1 result):
-{mcq_json}
-
-TASK — {task_line}, connected to Call 1 (do not redo
-full extraction from scratch):
-
-{step_a_text}STEP B — FULL VERIFICATION on this MCQ list — never
-skip or shortcut this, regardless of how confident Call 1 was. NOTE: each MCQ's "question",
-"options", and "explanation" fields above are truncated to save space (just enough to identify
-which MCQ is which) — always re-read the FULL text from the actual page image and output the
-complete, untruncated, corrected question/options/explanation in your response:
-1) OPTION-SERIAL INTEGRITY: is the answer letter (A/B/C/D) pointing to the option that is
-   actually in that position in THIS output list (not the source's original label)? If the
-   correct option's text sits in position 2 of the output, answer must be "B", etc. Fix any
-   mismatch.
-2) ANSWER SOURCE MATCH: does the answer actually match what is marked/given on the page
-   (marked option, inline answer, bottom-of-page answer box/table, or answer key found on
-   another page — scan forward/backward through all pages as needed)? Fix if wrong.
-3) If an MCQ's answer is genuinely unclear from any source → try twice, reasoning it out from
-   context, to determine the most likely correct answer. If STILL unclear after 2 tries, choose
-   your own best answer, and base the explanation on that chosen answer.
-4) SPELLING + CONTEXT-WORD CHECK: check question + all options + explanation for (a) spelling
-   mistakes (Bangla or English), and (b) any word that is spelled fine but is CONTEXTUALLY WRONG
-   for this MCQ's subject/topic (e.g. an OCR/extraction slip that swapped in a similar-looking but
-   unrelated term that doesn't fit the science/subject context) — replace it with the word that
-   actually fits the MCQ's context and meaning, cross-checked against the source image. Never
-   change a word that is already correct and contextually fitting, even if unusual.
-5) COMPLETENESS CHECK: re-read the full question and every option word-by-word against the
-   image — fix any truncated/partial word or sentence (e.g. a word cut to only its tail). Also
-   confirm math/chemistry sub/superscripts (H₂O, x², Na⁺ etc.) are correctly rendered everywhere.
-6c) LATEX CHECK: scan question/options/explanation for any raw LaTeX left over from extraction
-   (backslash-vec, backslash-hat, backslash-frac, backslash-sqrt, caret, underscore, curly braces
-   used as LaTeX syntax) — convert every one to proper Unicode
-   (vectors: A⃗, î, ĵ, k̂; fractions: a/b; roots: √x; sub/superscripts as actual Unicode chars).
-   Only leave LaTeX if that ONE specific expression is genuinely impossible to represent clearly
-   in Unicode/plain text (rare — e.g. a multi-line matrix) — never leave LaTeX out of laziness.
-6b) COLUMN-ORDER CHECK: if the source page has multiple columns, confirm the MCQ list follows
-   COLUMN-MAJOR order (entire left column top-to-bottom, then next column top-to-bottom) — never
-   zigzag/interleave between columns. Re-order the list if columns got mixed.
-7) UDDIPOK CHECK: for any MCQ that depends on a passage/উদ্দীপক, confirm its full passage text
-   is prepended to the question (self-contained), and that ONLY the specific navigation sentence
-   naming which question numbers to answer (e.g. "উদ্দীপকের আলোকে NN ও NN নং প্রশ্নের উত্তর দাও")
-   is removed — never strip a real question just because it mentions "উদ্দীপক" (e.g. "উদ্দীপকে
-   প্রদর্শিত প্রক্রিয়াটি কোন উপদশায় ঘটে?" is a genuine question and must stay in full).
-9) EXPLANATION SOURCE TAG (mandatory, new field): for each MCQ, add "explanation_source" as
-   either "page" (the explanation is copied verbatim from text physically present on the page,
-   e.g. a written ব্যাখ্যা/answer-reasoning block) or "generated" (no such text exists on the
-   page, so the explanation was built from AI knowledge). Be honest and precise about this —
-   it is used for quality auditing, not shown to end users.
-10) EXPLANATION LENGTH (mandatory) — this MUST fit Telegram's poll-explanation box, hard cap
-   ~265 characters. If explanation_source="page" (text is physically on the page): use it as-is
-   if it already fits within ~265 characters; if the on-page text is longer than that, trim it
-   down to the most essential 2-3 sentences (still page-sourced, just condensed) rather than
-   discarding it for a generated one. If explanation_source="generated" (nothing on the page):
-   write a fresh 2-3 sentence explanation (why the answer is correct + one relevant fact) that
-   stays within ~265 characters — never a single one-line answer restatement, never a wall of
-   text past the limit.
-
-CRITICAL: OUTPUT LIST ORDER (mandatory) — never move an MCQ to the end or anywhere else just
-because it needed a fix — fix it in place, at its original index.
-
-Output ONLY the full corrected JSON array, all fixes applied, same length/order as input:
-[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated"}}]"""
-
-
-async def _qbm_call1_extract(img, careful: bool = False, gemini_only: bool = True) -> list:
+async def _qbm_call1_extract(img, careful: bool = False, gemini_only: bool = False) -> list:
     """
     CALL 1 — OWN OCR + strict-prompt MCQ extraction + inline dedup.
     Job: extract every existing MCQ on the page (option-serial strictly
@@ -27200,7 +27046,69 @@ async def _qbm_call1_extract(img, careful: bool = False, gemini_only: bool = Tru
         return []
 
 
-async def _qbm_call2_miss_check(img, call1_mcqs: list, gemini_only: bool = True) -> list:
+async def _qbm_lightweight_miss_check(img, call1_mcqs: list, gemini_only: bool = False) -> list:
+    """
+    Dedicated MISS-CHECK ONLY call -- lightweight by design. Job is ONLY:
+    scan the full page image once, compare against the full existing MCQ
+    list (all of it, not chunked -- miss-check needs the complete picture to
+    know what's already found), and return ONLY the small number of MISSED
+    MCQs (if any). No spelling/answer-source/completeness/column-order
+    verification here -- that's Step B's job, done separately per-chunk on
+    the (Call1 + these newly-found) combined list. Splitting it out this way
+    means: (a) miss-check runs exactly ONCE per page instead of once per
+    verify-chunk, (b) its output is small (usually 0, rarely 1-5 new MCQs)
+    instead of re-emitting the whole list, so this call stays cheap even on
+    dense pages. Returns [] if nothing was missed (the common case).
+    """
+    if not call1_mcqs:
+        return []
+    try:
+        # Only question text needed here (just enough for the model to know
+        # what's already found) -- options/answer/explanation add nothing to
+        # a miss-check decision and would only bloat this call for no reason.
+        existing_qs = json.dumps(
+            [(m.get("question", "") or "")[:150] for m in call1_mcqs],
+            ensure_ascii=False
+        )
+        prompt = f"""You already extracted these MCQ questions from this exact page image:
+{existing_qs}
+
+TASK — MISS-CHECK ONLY (do not verify/correct the ones above, that happens separately):
+1) Look at the ENTIRE page image now and mentally divide it into regions (top/middle/bottom,
+   left/right if multi-column) — scan EACH region for any MCQ block (question + options) that
+   exists on the page.
+2) For every MCQ block you find, check: is its question already present in the list above (same
+   or very similar question)? If NOT present, it was MISSED.
+3) Pay special attention to the LAST MCQ on the page and the BOTTOM of the page — most commonly
+   missed — but this is in ADDITION to the full scan above, not instead of it.
+4) If NOTHING was missed (the common case), output an empty array: []
+5) If MCQs were missed, output ONLY those missed MCQs (do not repeat the ones already in the
+   list above) in the same strict format: options in the exact source position order, A/B/C/D
+   slots by position (never relabeled/sorted); if a missed MCQ belongs under a passage/উদ্দীপক,
+   prepend that passage's full text to its question (self-contained).
+
+OUTPUT — ONLY a valid JSON array of the MISSED MCQs (empty array if none), nothing else:
+[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated"}}]"""
+
+        # Gemini-primary miss-check (Call2 verify is now Gemini-primary too,
+        # so it already re-scans the full page -- no need to double-spend a
+        # Gemini call here on top of it). Groq fallback only if Gemini fails
+        # or returns nothing.
+        gem_txt = await _qbm_gemini_raw(img, prompt)
+        result = _qbm_parse_json(gem_txt) if gem_txt else []
+        if not result and not gemini_only:
+            txt = await _qbm_groq_call(img, prompt)
+            result = _qbm_parse_json(txt) if txt else []
+        if not result and not gemini_only:
+            or_txt = await _qbm_openrouter_call(img, prompt)
+            result = _qbm_parse_json(or_txt) if or_txt else []
+        return result or []
+    except Exception as e:
+        logger.warning(f"[QBM Miss-Check] failed: {e}")
+        return []
+
+
+async def _qbm_call2_miss_check(img, call1_mcqs: list, gemini_only: bool = False) -> list:
     """
     CALL 2 (dispatcher) — miss-check (ONE lightweight call, always against
     the FULL list regardless of page density) followed by full verification
@@ -27219,19 +27127,22 @@ async def _qbm_call2_miss_check(img, call1_mcqs: list, gemini_only: bool = True)
     """
     if not call1_mcqs:
         return []
-    # 2026-11-17 (user request): 2 Gemini calls per page total, not 3. The
-    # separate dedicated _qbm_lightweight_miss_check call used to run FIRST
-    # here, then _qbm_call2_single(do_miss_check=True) ran its OWN full
-    # miss-check (STEP A) on top -- the exact same job done twice across two
-    # calls. _qbm_call2_single's single combined pass already does
-    # everything: miss-check + insert any found MCQ at the correct position,
-    # spelling/context-word fix, serial/option-order integrity, and answer
-    # correctness checked against what's actually marked on the page. Call2
-    # alone now covers all of it.
-    return await _qbm_call2_single(img, call1_mcqs, do_miss_check=True, gemini_only=gemini_only)
+    missed = await _qbm_lightweight_miss_check(img, call1_mcqs, gemini_only=gemini_only)
+    for m in (missed or []):
+        m.setdefault("_call1_provider", "MissCheck")
+    combined = call1_mcqs + (missed or [])
+
+    # Gemini is now Call2's primary provider (no tight per-call TPM ceiling
+    # like Groq's 8000 TPM, which is what chunking existed to protect) --
+    # always send the full page in ONE unchunked verify call. do_miss_check=
+    # True here too (on top of the dedicated lightweight miss-check above) --
+    # a second independent miss-scan inside the SAME call that also does
+    # full verification, so any MCQ the lightweight pass missed still has
+    # one more chance to be caught before this page's result is final.
+    return await _qbm_call2_single(img, combined, do_miss_check=True, gemini_only=gemini_only)
 
 
-async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True, gemini_only: bool = True) -> list:
+async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True, gemini_only: bool = False) -> list:
     """
     CALL 2 (single chunk) — MERGED miss-check + full verification (single call,
     no separate Call 3). Job:
@@ -27242,9 +27153,7 @@ async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True, g
        matches what's actually marked/given on the source page (scanning other
        pages for an answer key if needed), spelling/context-word correctness
        (Bangla/English), completeness (no truncated words), column-order,
-       উদ্দীপক self-containment, and explanation_source tagging.
-       (2026-11-17: qsn_bbox/diagram-crop check removed from this verify
-       pass per user request -- feature disabled across /qbm.)
+       উদ্দীপক self-containment, diagram bbox, and explanation_source tagging.
     Gemini primary (full-page single call, no chunking) -> Groq fallback ->
     OpenRouter last resort, only if Gemini fails.
     """
@@ -27266,30 +27175,103 @@ async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True, g
             return opts
         mcq_json = json.dumps([
             {"question": (m.get("question", "") or "")[:_q_cap], "options": _trim_opts(m.get("options", [])),
-             "answer": m.get("answer", "A"), "explanation": (m.get("explanation", "") or "")[:60]}
+             "answer": m.get("answer", "A"), "explanation": (m.get("explanation", "") or "")[:60],
+             "qsn_bbox": m.get("qsn_bbox")}
             for m in call1_mcqs
         ], ensure_ascii=False)
 
-        step_a_text = QBM_CALL2_STEP_A_TEXT if do_miss_check else ""
+        step_a_text = """STEP A — MISS-CHECK (mandatory, full-image scan every time):
+1) Look at the ENTIRE page image now, independent of the list below — mentally divide it into
+   regions (top/middle/bottom, left/right if multi-column) and scan EACH region for any MCQ
+   block that exists on the page. Do NOT limit your scan to areas "near" the MCQs already in the
+   list — a page can have missed MCQs anywhere, including entirely separate regions the list
+   below doesn't cover at all (this list is only PART of the page's MCQs when the page has more
+   MCQs than fit in one verification chunk).
+2) For every MCQ block you find on the page, check: is it already present in the list below
+   (same question)? If NOT present, it was MISSED — add it in the SAME strict format (options in
+   the exact source position order, A/B/C/D slots by position — never relabeled/sorted). If it
+   belongs under a passage/উদ্দীপক, prepend that passage's full text to its question
+   (self-contained), same as Call 1's rule.
+3) Pay special attention to the LAST MCQ on the page and the BOTTOM of the page — most commonly
+   missed — but this is in ADDITION to the full scan above, not instead of it.
+
+""" if do_miss_check else ""
         task_line = ("do BOTH steps below in this single pass" if do_miss_check
                      else "do STEP B below only (miss-check was already done separately -- "
                           "this list is final, just verify/correct it)")
-        _call2_tmpl = await prompt_get_active("qbm_call2")
-        try:
-            prompt = _call2_tmpl.format(
-                mcq_json=(mcq_json if call1_mcqs else "(none found)"),
-                task_line=task_line,
-                step_a_text=step_a_text,
-            )
-        except (KeyError, IndexError, ValueError) as _fmt_e:
-            # Admin-edited override broke a {placeholder} -- degrade to the
-            # built-in default rather than crashing every Call2 request.
-            logger.warning(f"[QBM Call2] prompt override .format() failed ({_fmt_e}), using built-in default for this call")
-            prompt = QBM_CALL2_PROMPT_DEFAULT.format(
-                mcq_json=(mcq_json if call1_mcqs else "(none found)"),
-                task_line=task_line,
-                step_a_text=step_a_text,
-            )
+        prompt = f"""You already extracted these MCQs from this exact page image (Call 1 result):
+{mcq_json if call1_mcqs else "(none found)"}
+
+TASK — {task_line}, connected to Call 1 (do not redo
+full extraction from scratch):
+
+{step_a_text}STEP B — FULL VERIFICATION on this MCQ list — never
+skip or shortcut this, regardless of how confident Call 1 was. NOTE: each MCQ's "question",
+"options", and "explanation" fields above are truncated to save space (just enough to identify
+which MCQ is which) — always re-read the FULL text from the actual page image and output the
+complete, untruncated, corrected question/options/explanation in your response:
+1) OPTION-SERIAL INTEGRITY: is the answer letter (A/B/C/D) pointing to the option that is
+   actually in that position in THIS output list (not the source's original label)? If the
+   correct option's text sits in position 2 of the output, answer must be "B", etc. Fix any
+   mismatch.
+2) ANSWER SOURCE MATCH: does the answer actually match what is marked/given on the page
+   (marked option, inline answer, bottom-of-page answer box/table, or answer key found on
+   another page — scan forward/backward through all pages as needed)? Fix if wrong.
+3) If an MCQ's answer is genuinely unclear from any source → try twice, reasoning it out from
+   context, to determine the most likely correct answer. If STILL unclear after 2 tries, choose
+   your own best answer, and base the explanation on that chosen answer.
+4) SPELLING + CONTEXT-WORD CHECK: check question + all options + explanation for (a) spelling
+   mistakes (Bangla or English), and (b) any word that is spelled fine but is CONTEXTUALLY WRONG
+   for this MCQ's subject/topic (e.g. an OCR/extraction slip that swapped in a similar-looking but
+   unrelated term that doesn't fit the science/subject context) — replace it with the word that
+   actually fits the MCQ's context and meaning, cross-checked against the source image. Never
+   change a word that is already correct and contextually fitting, even if unusual.
+5) COMPLETENESS CHECK: re-read the full question and every option word-by-word against the
+   image — fix any truncated/partial word or sentence (e.g. a word cut to only its tail).
+6) Re-confirm option order was never reshuffled and math/chemistry sub/superscripts (H₂O, x²,
+   Na⁺ etc.) are correctly rendered everywhere.
+6c) LATEX CHECK: scan question/options/explanation for any raw LaTeX left over from extraction
+   (backslash-vec, backslash-hat, backslash-frac, backslash-sqrt, caret, underscore, curly braces
+   used as LaTeX syntax) — convert every one to proper Unicode
+   (vectors: A⃗, î, ĵ, k̂; fractions: a/b; roots: √x; sub/superscripts as actual Unicode chars).
+   Only leave LaTeX if that ONE specific expression is genuinely impossible to represent clearly
+   in Unicode/plain text (rare — e.g. a multi-line matrix) — never leave LaTeX out of laziness.
+6b) COLUMN-ORDER CHECK: if the source page has multiple columns, confirm the MCQ list follows
+   COLUMN-MAJOR order (entire left column top-to-bottom, then next column top-to-bottom) — never
+   zigzag/interleave between columns. Re-order the list if columns got mixed.
+7) UDDIPOK CHECK: for any MCQ that depends on a passage/উদ্দীপক, confirm its full passage text
+   is prepended to the question (self-contained), and that ONLY the specific navigation sentence
+   naming which question numbers to answer (e.g. "উদ্দীপকের আলোকে NN ও NN নং প্রশ্নের উত্তর দাও")
+   is removed — never strip a real question just because it mentions "উদ্দীপক" (e.g. "উদ্দীপকে
+   প্রদর্শিত প্রক্রিয়াটি কোন উপদশায় ঘটে?" is a genuine question and must stay in full).
+8) QUESTION-DIAGRAM CHECK: if this MCQ's question genuinely has a diagram/figure/chart in the
+   source image needed to understand/answer it, confirm "qsn_bbox" is present and FULLY contains
+   the entire diagram (all labels/arrows/edges, small margin included — never a partial/cut-off
+   crop) on a 0-1000 scale. Add or widen qsn_bbox if the diagram was missed or cut off. SPECIAL
+   CHECK: if the question text contains a bare figure caption/label like "চিত্র: G", "চিত্র-১",
+   "Figure 1" with no qsn_bbox — that caption is proof a diagram exists nearby; you MUST add
+   qsn_bbox covering that actual diagram (never leave just the caption text uncropped). If
+   qsn_bbox was given but the question has NO actual diagram, remove it (set to null). Never
+   invent a bbox for options — options never get any bbox/image.
+9) EXPLANATION SOURCE TAG (mandatory, new field): for each MCQ, add "explanation_source" as
+   either "page" (the explanation is copied verbatim from text physically present on the page,
+   e.g. a written ব্যাখ্যা/answer-reasoning block) or "generated" (no such text exists on the
+   page, so the explanation was built from AI knowledge). Be honest and precise about this —
+   it is used for quality auditing, not shown to end users.
+10) EXPLANATION LENGTH (mandatory) — this MUST fit Telegram's poll-explanation box, hard cap
+   ~265 characters. If explanation_source="page" (text is physically on the page): use it as-is
+   if it already fits within ~265 characters; if the on-page text is longer than that, trim it
+   down to the most essential 2-3 sentences (still page-sourced, just condensed) rather than
+   discarding it for a generated one. If explanation_source="generated" (nothing on the page):
+   write a fresh 2-3 sentence explanation (why the answer is correct + one relevant fact) that
+   stays within ~265 characters — never a single one-line answer restatement, never a wall of
+   text past the limit.
+
+CRITICAL: OUTPUT LIST ORDER (mandatory) — never move an MCQ to the end or anywhere else just
+because it needed a fix — fix it in place, at its original index.
+
+Output ONLY the full corrected JSON array, all fixes applied, same length/order as input:
+[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated","qsn_bbox":[100,200,400,450]}}]"""
 
         gem_txt = await _qbm_gemini_raw(img, prompt)
         result = _qbm_parse_json(gem_txt) if gem_txt else []
@@ -27362,7 +27344,7 @@ async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True, g
         return call1_mcqs
 
 
-async def _qbm_final_empty_page_scan(img, onu_mode: bool = False, gemini_only: bool = True) -> list:
+async def _qbm_final_empty_page_scan(img, onu_mode: bool = False, gemini_only: bool = False) -> list:
     """
     CALL 3 (empty-page variant) — used ONLY when Call 1 AND Call 2 BOTH
     returned zero MCQs. Two independent empty results is a strong signal but
@@ -27599,7 +27581,7 @@ def _cap_qbm_mcq_cache(cache_dict: dict = None):
         d.pop(next(iter(d)), None)
 
 
-async def _qbm_extract_from_image(img, cache_key: tuple = None, bypass_cache: bool = False, careful: bool = False, gemini_only: bool = True) -> list:
+async def _qbm_extract_from_image(img, cache_key: tuple = None, bypass_cache: bool = False, careful: bool = False, gemini_only: bool = False) -> list:
     """
     2-STAGE CONNECTED PIPELINE (per page) — Call1 extract + Call2 (which
     itself makes 2 sub-calls: miss-check, then verify), so up to 3 Gemini
@@ -27922,7 +27904,7 @@ No markdown, no extra text."""
         return {}
 
 
-async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = True) -> list:
+async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = False) -> list:
     """
     Last-line, zero-trust, CODE-LEVEL (not prompt-level) safety net applied to
     every MCQ right before it leaves the extraction pipeline. Balances and
@@ -27968,20 +27950,19 @@ async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = True) -> li
 
         _qbm_balance_answer_with_options(mc)
 
-        # 2026-11-17 (user request): /qbm explanation stays FULLY empty --
-        # no deterministic "সঠিক উত্তর: X" filler either. Previously this
-        # block auto-filled a short line whenever explanation was blank;
-        # removed so an empty explanation from Call1/Call2 ships as-is.
+        if not (mc.get("explanation") or "").strip():
+            # SIMPLIFIED (per request): no extra AI call to generate a long
+            # explanation -- just a short deterministic "correct answer is X"
+            # line, zero extra tokens/API calls.
+            ans = mc.get("answer", "A")
+            opt_letters = ["A", "B", "C", "D"]
+            idx = opt_letters.index(ans) if ans in opt_letters else 0
+            ans_text = opts[idx] if idx < len(opts) else ""
+            mc["explanation"] = f"সঠিক উত্তর: {ans} ({ans_text})" if ans_text else f"সঠিক উত্তর: {ans}"
 
-        # 2026-11-17 (user request): qsn_bbox/diagram-crop feature disabled
-        # for /qbm -- this figure-caption-triggered bbox-recovery call
-        # (which fired an extra Gemini request whenever a question's text
-        # contained a caption like "চিত্র: G" with no qsn_bbox) is disabled
-        # too, so a disabled feature never still costs an API call. Left
-        # commented rather than deleted in case it needs re-enabling later:
-        # if not mc.get("qsn_bbox") and "<img" not in mc["question"].lower() and _FIGURE_CAPTION_RE.search(mc["question"]):
-        #     pending_bbox_idx[len(fixed)] = mc["question"]
-        #     batch_items.append({"idx": len(fixed), "type": "bbox", "question": mc["question"]})
+        if not mc.get("qsn_bbox") and "<img" not in mc["question"].lower() and _FIGURE_CAPTION_RE.search(mc["question"]):
+            pending_bbox_idx[len(fixed)] = mc["question"]
+            batch_items.append({"idx": len(fixed), "type": "bbox", "question": mc["question"]})
 
         fixed.append(mc)
 
@@ -28331,7 +28312,7 @@ _QBM_CAREFUL_SCAN_ADDENDUM = (
 )
 
 
-async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: bool = True, _fallback_model: str = None) -> str:
+async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: bool = False, _fallback_model: str = None) -> str:
     """Direct Gemini call with any given prompt -> raw text (caller parses).
     Tries keys in healthiest-first order, one after another, until one
     succeeds -- a single key's 429 RESOURCE_EXHAUSTED (daily quota, only 20
@@ -28511,22 +28492,13 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 # or exposed which account/key actually won, unlike /pdf's
                 # pipeline (_attach_gemini_success_info). Mirror that here.
                 try:
-                    from pdf_handler import _gemini_key_hash, _last_gemini_success_ctx, _qbm_page_gemini_info_ctx
+                    from pdf_handler import _gemini_key_hash, _last_gemini_success_ctx
                     logger.info(f"[QBM Gemini] success — account={_used_acct} key={_gemini_key_hash(key)}")
-                    _ginfo_dict = {
+                    _last_gemini_success_ctx.set({
                         "account": _used_acct,
                         "key_hash": _gemini_key_hash(key),
                         "model": _fallback_model or "gemini-3.6-flash",
-                    }
-                    _last_gemini_success_ctx.set(_ginfo_dict)  # kept for any other same-task reader
-                    # FIX: the contextvar .set() above is invisible to
-                    # _extract_one (spawned-task context-copy boundary) --
-                    # mutate the shared per-page dict instead, which IS
-                    # visible there. See _qbm_page_gemini_info_ctx comment.
-                    _shared_ginfo = _qbm_page_gemini_info_ctx.get()
-                    if _shared_ginfo is not None:
-                        _shared_ginfo.clear()
-                        _shared_ginfo.update(_ginfo_dict)
+                    })
                 except Exception:
                     pass
                 # 2026-09-08 ROOT-CAUSE DIAGNOSTIC: response.text can be
@@ -28676,7 +28648,7 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
         return ""
 
 
-async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = True, _fallback_model: str = None) -> str:
+async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = False, _fallback_model: str = None) -> str:
     """Multi-image variant of _qbm_gemini_raw -- sends several page images
     in ONE Gemini call instead of one call per image, used by /bio's
     batched heading-scan (_bio_apply_heading_scan) to cut per-page API
@@ -28849,7 +28821,7 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Tru
         return "" if gemini_only else (await _gen_groq_raw_text(imgs[0], prompt) if imgs else "")
 
 
-async def _ai_gemini_text_call(prompt: str, gemini_only: bool = True, _fallback_model: str = None) -> str:
+async def _ai_gemini_text_call(prompt: str, gemini_only: bool = False, _fallback_model: str = None) -> str:
     """Text-only Gemini call (no image) for /ai's explanation generation.
     Same key-rotation/exhaustion handling as _qbm_gemini_raw, minus the
     image part -- tries every non-exhausted key in order before giving up.
@@ -29242,7 +29214,7 @@ async def handle_ai(msg: dict):
         await _safe_error_reply(chat_id, e)
 
 
-async def _qbm_gemini_extract(img, prompt: str = None, _return_marker_info: bool = False, careful: bool = False, gemini_only: bool = True, allow5: bool = False):
+async def _qbm_gemini_extract(img, prompt: str = None, _return_marker_info: bool = False, careful: bool = False, gemini_only: bool = False, allow5: bool = False):
     """Direct Gemini call with the strict extraction prompt (fallback path).
 
     2026-08-20: added optional _return_marker_info flag (default False, so
@@ -29307,7 +29279,7 @@ async def _qbm_groq_text_call(prompt: str, model: str = "openai/gpt-oss-120b") -
     return ""
 
 
-async def _qbm_web_resolve_answer(mc: dict, gemini_only: bool = True) -> dict | None:
+async def _qbm_web_resolve_answer(mc: dict, gemini_only: bool = False) -> dict | None:
     """
     LAST-RESORT answer resolution -- used ONLY when the answer could not be
     found anywhere in the page/PDF (no mark, no inline answer, no answer-key
@@ -29395,7 +29367,7 @@ Line 3: the 165-char-max Bengali explanation (omit this line entirely if Line 2 
         return None
 
 
-async def _qbm_build_explanation_for_known_answer(mc: dict, answer_letter: str, gemini_only: bool = True) -> str:
+async def _qbm_build_explanation_for_known_answer(mc: dict, answer_letter: str, gemini_only: bool = False) -> str:
     """
     Builds a clean, question-related, step-by-step Bengali explanation
     when the correct answer is already known (e.g. matched from an
@@ -29947,8 +29919,7 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
         or (file_unique_id and _pdf_unique_id_index.get(file_unique_id) in _pdf_bytes_cache)
     )
     status_r = await send_msg(chat_id, ("✅ Cached PDF ব্যবহার হচ্ছে...\n📄 " + file_name) if _is_cache_hit else
-        ("⏳ " + ("Image" if is_image_reply else "PDF") + f" download হচ্ছে...\n📄 {file_name}\n[░░░░░░░░░░ 0%]"),
-        reply_to_message_id=msg.get("message_id"))
+        ("⏳ " + ("Image" if is_image_reply else "PDF") + f" download হচ্ছে...\n📄 {file_name}\n[░░░░░░░░░░ 0%]"))
     status_msg_id = status_r.get("result", {}).get("message_id")
 
     _last_pct = {"v": -1}
@@ -30039,39 +30010,18 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
         # Channel selection + CSV file generation happen only AFTER extraction
         # is fully complete, so the person picks a channel already knowing
         # exactly how many MCQs were found.
-        _qbm_final_page_status: list = []
-        _qbm_extract_start_time = time.time()
         if mode_v:
             # /v: 2-call Gemini-only pipeline, no lookahead/web-resolve/extra retries
             extracted_pages = await qbm_extract_all_pages(
                 chat_id, pages, topic, file_name, status_msg_id, extractor=_v_extract_from_image,
                 file_id=file_id, gemini_only=True, job_id=_qbm_extract_job_id,
-                no_knowledge_fallback=True, skip_lookahead=True, strict_calls=True,
-                page_status_out=_qbm_final_page_status
+                no_knowledge_fallback=True, skip_lookahead=True, strict_calls=True
             )
         else:
             extracted_pages = await qbm_extract_all_pages(
                 chat_id, pages, topic, file_name, status_msg_id, file_id=file_id, gemini_only=True,
-                job_id=_qbm_extract_job_id, page_status_out=_qbm_final_page_status
+                job_id=_qbm_extract_job_id
             )
-
-        # 2026-11-16 (user request): final dashboard refresh WITHOUT the
-        # cancel button -- extraction is fully done at this point (including
-        # any final-safety-net recovery rounds, which run after the ticker
-        # already stopped and so were never reflected on-screen), and a
-        # cancel button has no purpose on a finished job. Only the dashboard
-        # itself should remain -- no keyboard at all.
-        if status_msg_id and _qbm_final_page_status and not is_cancelled(chat_id):
-            try:
-                _final_total_mcq = sum(len(mcqs) for _, _, mcqs in extracted_pages)
-                _final_text = _build_dashboard(
-                    file_name, topic, pages, _qbm_final_page_status, _qbm_extract_start_time,
-                    _final_total_mcq, 0, ai_calls=_get_ai_call_count(chat_id),
-                    ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)
-                )
-                await edit_msg(chat_id, status_msg_id, _final_text, reply_markup={"inline_keyboard": []})
-            except Exception as _final_dash_e:
-                logger.warning(f"[QBM] final cancel-free dashboard edit failed: {_final_dash_e}")
 
         if _qbm_extract_job_id:
             # Extraction finished cleanly (no crash) -- this job no longer
@@ -30110,13 +30060,12 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
             # "📋 Channel List" button থাকবে -- চাপলে তখন actual channel
             # buttons (2 per row) reveal হবে সেই একই CSV message-এ edit করে।
             if total_mcq_found:
-                # 2026-11-17 (user request): /qbm explanation stays FULLY
-                # empty by design (see QBM_EXTRACT_PROMPT_NO_EXPLANATION and
-                # the 2026-11-17 note in _qbm_final_safety_net) -- this
-                # fallback block used to call _ai_generate_all_explanations
-                # on every MCQ with a blank explanation right before CSV
-                # export, silently re-adding explanations /qbm is supposed
-                # to never generate. Removed; blank explanation ships as-is.
+                _missing_exp_qbm = [m for _, _, mcqs in extracted_pages for m in mcqs if not (m.get("explanation") or "").strip()]
+                if _missing_exp_qbm:
+                    try:
+                        await _ai_generate_all_explanations(_missing_exp_qbm)
+                    except Exception as e:
+                        logger.warning(f"[QBM] fallback explanation fill failed: {e}")
                 import io as _io_qbm, csv as _csv_mod_qbm
                 _buf_qbm = _io_qbm.StringIO()
                 _w_qbm = _csv_mod_qbm.writer(_buf_qbm)
@@ -30141,8 +30090,7 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
                     f"{topic}_QBM.csv",
                     caption=f"📋 {topic} — {total_mcq_found} MCQ (Extracted)",
                     mime_type="text/csv",
-                    reply_markup=_csv_kb,
-                    reply_to_message_id=status_msg_id)
+                    reply_markup=_csv_kb)
             return
 
 
@@ -31764,13 +31712,12 @@ async def _onu_call1_extract(img, info: dict = None) -> list:
     explicit "there IS a red-boxed MCQ" note. Reason goes to info["err"]."""
     last_err = ""
     _empty_seen = False
-    _onu_base_prompt = await prompt_get_active("onu")
     for attempt in range(1, 4):
         if _onu_job_cancelled():
             break
         txt = ""
         try:
-            txt = await _qbm_gemini_raw(img, _onu_base_prompt + (_ONU_EMPTY_RETRY_NOTE if _empty_seen else ""),
+            txt = await _qbm_gemini_raw(img, ONU_EXTRACT_PROMPT_GEMINI + (_ONU_EMPTY_RETRY_NOTE if _empty_seen else ""),
                                         careful=_empty_seen, gemini_only=True)
         except Exception as e:
             last_err = f"Gemini error: {str(e)[:60]}"
@@ -32861,216 +32808,6 @@ No red-marked MCQ on this page -> return [].
 OUTPUT — ONLY valid JSON array, nothing else, no markdown fences, no commentary:
 [{"mcq_no":"...","question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","marked_answer_wrong":false,"no_mark":false,"explanation":"..."}]"""
 
-# ── /prompt command backend (2026-11-16) ───────────────────────────────
-# Generic DB-backed override storage for any extraction prompt, mirroring
-# qbm_get_active_prompt/qbm_set_active_prompt's pattern (same Supabase
-# table "quiz_sessions", one row per key="prompt_active_<name>"). Separate
-# from QBM's own storage (key="qbm_active_prompt") so existing /qbmprompt
-# behavior is untouched -- "qbm_call1" in PROMPT_REGISTRY routes through the
-# original qbm_get_active_prompt/qbm_set_active_prompt functions instead.
-_generic_prompt_cache = {}
-
-async def generic_get_active_prompt(key: str, default: str) -> str:
-    if key in _generic_prompt_cache:
-        return _generic_prompt_cache[key]
-    try:
-        r = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"prompt_active_{key}").execute())
-        if r.data:
-            saved = json.loads(r.data[0]["data"])
-            p = saved.get("prompt")
-            if p:
-                _generic_prompt_cache[key] = p
-                return p
-    except Exception as e:
-        logger.warning(f"[PROMPT] load failed for '{key}': {e}")
-    _generic_prompt_cache[key] = default
-    return default
-
-async def generic_set_active_prompt(key: str, new_prompt: str):
-    _generic_prompt_cache[key] = new_prompt
-    try:
-        await sb_exec(lambda: sb.table("quiz_sessions").upsert({
-            "key": f"prompt_active_{key}",
-            "data": json.dumps({"prompt": new_prompt}),
-            "updated_at": int(time.time())
-        }).execute())
-    except Exception as e:
-        logger.warning(f"[PROMPT] save failed for '{key}': {e}")
-
-# key -> {"label": grid-button text, "default": built-in prompt constant}.
-# NOTE: this only covers the commands whose extraction call sites have
-# been switched to read via prompt_get_active() below (/qbm, /topic,
-# /eng, /chem, /bcs, /unmesh, /onu). /onu2 is NOT yet wired -- its real
-# PDF pipeline runs on ONU2_CALL1_PROMPT_BATCHED_TMPL (a %-style {n}
-# template, different shape from the others), not plain ONU2_CALL1_PROMPT,
-# so it needs its own careful handling and is left for a follow-up.
-PROMPT_REGISTRY = {
-    "qbm_call1": {"label": "📝 /qbm C1", "default": QBM_EXTRACT_PROMPT_DEFAULT},
-    "qbm_call2": {"label": "📝 /qbm C2", "default": QBM_CALL2_PROMPT_DEFAULT},
-    "topic":  {"label": "📂 /topic",  "default": TOPIC_EXTRACT_PROMPT},
-    "eng":    {"label": "🇬🇧 /eng",   "default": ENG_EXTRACT_PROMPT},
-    "chem":   {"label": "🧪 /chem",   "default": CHEM_EXTRACT_PROMPT},
-    "bcs":    {"label": "🎓 /bcs",    "default": BCS_EXTRACT_PROMPT_CALL1},
-    "unmesh": {"label": "📘 /unmesh", "default": UNMESH_EXTRACT_PROMPT},
-    "onu":    {"label": "🖍️ /onu",   "default": ONU_EXTRACT_PROMPT_GEMINI},
-}
-# onu2_call1/onu2_call2 defaults reference ONU2_*_TMPL constants defined
-# further below in this file (after their real call sites) -- registered
-# here via a setter called once those constants exist, instead of at this
-# point in module load, to avoid a NameError on import.
-def _register_onu2_prompts():
-    PROMPT_REGISTRY["onu2_call1"] = {"label": "🖊️ /onu2 C1", "default": ONU2_CALL1_PROMPT_BATCHED_TMPL}
-    PROMPT_REGISTRY["onu2_call2"] = {"label": "🖊️ /onu2 C2", "default": ONU2_CALL2_MISSCHECK_PROMPT_BATCHED_TMPL}
-
-async def prompt_get_active(key: str) -> str:
-    """Single entry point every wired extraction call site uses instead of
-    its raw *_EXTRACT_PROMPT constant -- returns the admin-edited override
-    if one was saved via /prompt, else the built-in default unchanged."""
-    if key == "qbm_call1":
-        return await qbm_get_active_prompt()
-    if key not in PROMPT_REGISTRY:
-        return ""
-    return await generic_get_active_prompt(key, PROMPT_REGISTRY[key]["default"])
-
-async def prompt_set_active(key: str, text: str):
-    if key == "qbm_call1":
-        await qbm_set_active_prompt(text)
-    else:
-        await generic_set_active_prompt(key, text)
-
-async def prompt_reset_to_default(key: str):
-    if key in PROMPT_REGISTRY:
-        await prompt_set_active(key, PROMPT_REGISTRY[key]["default"])
-
-# ── /prompt command UI (2026-11-17) ─────────────────────────────────────
-# Grid of every PROMPT_REGISTRY command, 4 buttons/row -> tap a command ->
-# full active prompt shown (view) with ✏️ Edit / ♻️ Reset / ⬅️ Back under
-# it -> ✏️ Edit asks admin to reply with new text (reply-to-message, caught
-# via PROMPT_EDIT_PENDING) -> saved, re-shown. Back always present, always
-# returns to the grid, from whichever page it's on.
-def _prompt_main_menu_markup() -> dict:
-    keys = list(PROMPT_REGISTRY.keys())
-    rows = []
-    for i in range(0, len(keys), 4):
-        row_keys = keys[i:i + 4]
-        rows.append([{"text": PROMPT_REGISTRY[k]["label"], "callback_data": f"promptview_{k}"} for k in row_keys])
-    return {"inline_keyboard": rows}
-
-async def show_prompt_main_menu(chat_id, edit_message_id=None):
-    text = "🧠 <b>Prompt Manager</b>\n\nযেকোনো command select করো — active prompt দেখতে/edit করতে পারবে।"
-    markup = _prompt_main_menu_markup()
-    if edit_message_id:
-        await edit_msg(chat_id, edit_message_id, text, reply_markup=markup)
-    else:
-        await send_msg(chat_id, text, reply_markup=markup)
-
-def _prompt_view_markup(key: str) -> dict:
-    return {"inline_keyboard": [
-        [{"text": "✏️ Edit", "callback_data": f"promptedit_{key}"},
-         {"text": "♻️ Reset", "callback_data": f"promptreset_{key}"}],
-        [{"text": "⬅️ Back", "callback_data": "promptback"}],
-    ]}
-
-async def show_prompt_view(chat_id, key: str, edit_message_id=None):
-    if key not in PROMPT_REGISTRY:
-        return
-    label = PROMPT_REGISTRY[key]["label"]
-    active = await prompt_get_active(key)
-    escaped = html_lib.escape(active)
-    header = f"📋 <b>{label} — Active Prompt</b>\n\n"
-    # 2026-11-17 (user request): show the FULL prompt, never truncated --
-    # previously hard-cut at [:3500] chars, so long prompts (Call2's
-    # verification prompt especially) were silently cut off mid-sentence.
-    # Telegram's hard per-message cap is 4096 chars; a <pre> block renders
-    # compact/monospace ("font choto") and keeps the text readable as one
-    # continuous block. If header+prompt+<pre> tags still exceed the cap,
-    # split into overflow text-only messages first, with the final chunk
-    # (Edit/Reset/Back keyboard) landing on the message that edit_message_id
-    # actually points at.
-    _TAG_OVERHEAD = len("<pre></pre>")
-    _budget = 4096 - len(header) - _TAG_OVERHEAD - 10  # Telegram's hard per-message cap, small safety margin
-    if _budget < 200:
-        _budget = 200  # header itself is tiny/fixed-size, this floor is never actually hit
-    if len(escaped) <= _budget:
-        chunks = [escaped]
-    else:
-        chunks = [escaped[i:i + _budget] for i in range(0, len(escaped), _budget)]
-    markup = _prompt_view_markup(key)
-    # Overflow chunks (all but the last) are plain text-only follow-up
-    # messages -- only the LAST chunk carries the header + keyboard, on
-    # whichever message edit_message_id points at (or a fresh send_msg).
-    for i, chunk in enumerate(chunks[:-1]):
-        await send_msg(chat_id, f"<pre>{chunk}</pre> <i>(continued below…)</i>")
-    last_text = header + f"<pre>{chunks[-1]}</pre>"
-    if edit_message_id:
-        await edit_msg(chat_id, edit_message_id, last_text, reply_markup=markup)
-    else:
-        await send_msg(chat_id, last_text, reply_markup=markup)
-
-async def handle_prompt_callback(query: dict) -> bool:
-    data = query["data"]
-    chat_id = query["message"]["chat"]["id"]
-    msg_id = query["message"]["message_id"]
-    uid = query["from"]["id"]
-    if not data.startswith("prompt"):
-        return False
-    if not await db_is_owner_or_admin(uid):
-        return True
-    if data == "promptmenu" or data == "promptback":
-        PROMPT_EDIT_PENDING.pop(uid, None)
-        await show_prompt_main_menu(chat_id, edit_message_id=msg_id)
-        return True
-    if data.startswith("promptview_"):
-        key = data[len("promptview_"):]
-        await show_prompt_view(chat_id, key, edit_message_id=msg_id)
-        return True
-    if data.startswith("promptedit_"):
-        key = data[len("promptedit_"):]
-        if key not in PROMPT_REGISTRY:
-            return True
-        label = PROMPT_REGISTRY[key]["label"]
-        warn = ""
-        if key == "onu2_call1":
-            warn = "\n\n⚠️ <code>{n}</code> অবশ্যই রাখতে হবে (অক্ষত), নাহলে default prompt ব্যবহার হবে।"
-        elif key == "onu2_call2":
-            warn = "\n\n⚠️ <code>{n}</code> ও <code>{existing_list}</code> অবশ্যই রাখতে হবে (অক্ষত), নাহলে default prompt ব্যবহার হবে।"
-        sent = await send_msg(chat_id, f"✏️ <b>{label}</b> এর নতুন prompt লিখে এই message-এ reply করো।{warn}",
-                               reply_markup={"force_reply": True})
-        sent_id = (sent or {}).get("result", {}).get("message_id")
-        PROMPT_EDIT_PENDING[uid] = {"key": key, "msg_id": sent_id, "view_msg_id": msg_id}
-        return True
-    if data.startswith("promptreset_"):
-        key = data[len("promptreset_"):]
-        if key not in PROMPT_REGISTRY:
-            return True
-        await prompt_reset_to_default(key)
-        await show_prompt_view(chat_id, key, edit_message_id=msg_id)
-        return True
-    return True
-
-async def handle_prompt_text_input(msg: dict) -> bool:
-    uid = msg.get("from", {}).get("id")
-    pend = PROMPT_EDIT_PENDING.get(uid)
-    if not pend:
-        return False
-    reply = msg.get("reply_to_message")
-    if not reply or reply.get("message_id") != pend.get("msg_id"):
-        return False
-    new_text = (msg.get("text") or "").strip()
-    chat_id = msg["chat"]["id"]
-    if not new_text:
-        return False
-    key = pend["key"]
-    await prompt_set_active(key, new_text)
-    PROMPT_EDIT_PENDING.pop(uid, None)
-    label = PROMPT_REGISTRY.get(key, {}).get("label", key)
-    await send_msg(chat_id, f"✅ <b>{label}</b> prompt update হয়ে গেছে।")
-    await show_prompt_view(chat_id, key, edit_message_id=pend.get("view_msg_id"))
-    return True
-# ── end /prompt command UI ──────────────────────────────────────────────
-# ── end /prompt command backend ─────────────────────────────────────────
-
-
 ONU2_CALL1_PROMPT_BATCHED_TMPL = """MCQ EXTRACTOR — RED-MARKED SERIAL NUMBER ONLY, applied INDEPENDENTLY to {n} SEPARATE page images given to you in this SAME call (image order = page_index 1, 2, ... {n} — never mix content between pages, each page's MCQs stay strictly on that page's own page_index). The SOLE indicator for inclusion is a RED MARKING drawn AROUND or DIRECTLY BESIDE the MCQ's SERIAL NUMBER label (e.g. "১ক১", "1", "৪জ ৯", "১খ৩") — this marking can appear as a RED BOUNDARY, a RED BOX, or a RED RECTANGLE outline; all three are the same signal, just drawn differently by hand, and its exact position/shape varies (may sit tightly around just the number, may extend slightly to include the "।" or a couple of nearby characters, may be a clean rectangle or a rougher hand-drawn loop) -- judge by INTENT (is the serial number clearly circled/boxed in red?) not by exact pixel-perfect shape or position. This marking identifies which MCQ(s) are included, separate from the question text itself. It can be SHORT (wrapping just one number, marking a single MCQ) or TALL/VERTICAL (stretching down to wrap SEVERAL CONSECUTIVE numbers together in one boundary, marking that whole consecutive run of MCQs as included — e.g. one tall boundary spanning "১ক৬" through "১ক১০" means all 5 of those MCQs are included). Carefully trace each marking's edge to see exactly which serial numbers fall inside/beside it, ON ITS OWN PAGE. A red mark that is clearly NOT associated with any serial number at all (e.g. only around question text, an option, or a paragraph, with no number anywhere near it) does NOT count for inclusion — ignore it. IGNORE every MCQ whose serial number has no red boundary/box/rectangle marking it — do not extract it at all.
 
 CRITICAL — TWO COMPLETELY SEPARATE RED MARKS EXIST ON EACH PAGE, NEVER MIX THEM UP:
@@ -33186,8 +32923,6 @@ FORMATTING (apply to all question/option/explanation text above):
 
 OUTPUT — ONLY valid JSON object covering ALL {n} pages together, nothing else, no markdown fences:
 {{"missed": [{{"page_index":1,"mcq_no":"...","question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","marked_answer_wrong":false,"no_mark":false,"explanation":"..."}}], "answer_corrections": [{{"page_index":1,"mcq_no":"...","correct_answer":"A/B/C/D"}}], "text_corrections": [{{"page_index":1,"mcq_no":"...","corrected_question":"...","corrected_options":{{"B":"..."}}}}], "answer_key_overrides": [{{"page_index":1,"mcq_no":"...","key_answer":"A/B/C/D"}}]}}"""
-
-_register_onu2_prompts()
 
 ONU2_ANSWER_KEY_PROMPT_TMPL = """This page may contain an ANSWER KEY / উত্তরমালা section — this is a small table or grid that appears AFTER an entire MCQ set ends (not beside or next to individual MCQs), mapping question numbers to their correct option letter (e.g. "১।(ক) ২।(খ) ৩।(খ)..." or a table with numbered cells each showing "১ (ক)" style entries). It is often on a LATER page than the MCQs it covers -- if this page has no MCQs at all but has such a table, that's expected, still check it.
 
@@ -33395,11 +33130,7 @@ async def _onu2_call1_extract_batch(imgs: list) -> dict:
     n = len(imgs)
     if n == 0:
         return {}
-    _onu2_c1_tmpl = await prompt_get_active("onu2_call1")
-    try:
-        prompt = _onu2_c1_tmpl.format(n=n)
-    except (KeyError, IndexError):
-        prompt = ONU2_CALL1_PROMPT_BATCHED_TMPL.format(n=n)
+    prompt = ONU2_CALL1_PROMPT_BATCHED_TMPL.format(n=n)
     try:
         gem_txt = await _qbm_gemini_raw_multi(imgs, prompt, gemini_only=True)
         provider = "Gemini"
@@ -33590,11 +33321,7 @@ async def _onu2_call2_misscheck_batch(imgs: list, existing_by_index: dict) -> di
             for idx in range(1, n + 1)
         }
         existing_brief = json.dumps(existing_payload, ensure_ascii=False)
-        _onu2_c2_tmpl = await prompt_get_active("onu2_call2")
-        try:
-            prompt = _onu2_c2_tmpl.format(n=n, existing_list=existing_brief)
-        except (KeyError, IndexError):
-            prompt = ONU2_CALL2_MISSCHECK_PROMPT_BATCHED_TMPL.format(n=n, existing_list=existing_brief)
+        prompt = ONU2_CALL2_MISSCHECK_PROMPT_BATCHED_TMPL.format(n=n, existing_list=existing_brief)
         txt = await _qbm_gemini_raw_multi(imgs, prompt)
         if not txt:
             txt = await _qbm_groq_call(imgs[0], prompt)
@@ -34187,7 +33914,7 @@ async def _handle_onu2_impl(msg: dict):
                 pass
 
 
-async def _qbm_scan_answer_key(img, unresolved_mcqs: list, gemini_only: bool = True, serial_strict: bool = False) -> dict:
+async def _qbm_scan_answer_key(img, unresolved_mcqs: list, gemini_only: bool = False, serial_strict: bool = False) -> dict:
     """
     Given a page image and a list of MCQs whose answer wasn't found on their
     own page, check if THIS page contains an answer key (table, boxed list,
@@ -34366,7 +34093,7 @@ async def qbm_extract_all_pages(
     file_name: str, status_msg_id: int = None,
     extractor=None, file_id: str = None,
     page_status_out: list = None,
-    gemini_only: bool = True,
+    gemini_only: bool = False,
     job_id: str = None,
     no_knowledge_fallback: bool = False,
     skip_lookahead: bool = False,
@@ -34581,18 +34308,11 @@ async def qbm_extract_all_pages(
                             key = (m.get("question") or "").strip()[:80]
                             if key in found_map:
                                 m["answer"] = found_map[key]
-                                # 2026-11-17 (user request): /qbm explanation
-                                # stays FULLY empty -- previously, once the
-                                # answer was resolved from a lookahead answer
-                                # key, a missing/cleared explanation would get
-                                # backfilled via _qbm_build_explanation_for_known_answer.
-                                # That silently reintroduced explanations
-                                # /qbm is supposed to never generate, so just
-                                # clear any leftover placeholder and leave it
-                                # blank.
                                 m["explanation"] = (m.get("explanation") or "").replace(
                                     "Answer not found in source", ""
                                 ).strip()
+                                if not m["explanation"]:
+                                    m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m["answer"], gemini_only=gemini_only)
                         unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
 
             # Still unresolved after scanning nearby pages -> last-resort Groq
@@ -34716,10 +34436,8 @@ async def qbm_extract_all_pages(
         # unlike /pdf's — so no page-number cross-check here, best-effort).
         if mcqs and any(str(m.get("_provider", "")).lower().startswith("gemini") for m in mcqs):
             try:
-                # FIX: read the mutated shared dict (visible across the
-                # _spawn_task context-copy boundary), not the plain
-                # contextvar -- see _qbm_page_gemini_info_ctx comment.
-                _ginfo = _qbm_page_gemini_info_ctx.get()
+                from pdf_handler import _last_gemini_success_ctx
+                _ginfo = _last_gemini_success_ctx.get()
                 if _ginfo and _ginfo.get("account"):
                     page_status[idx]["gemini_account"] = _ginfo["account"]
                     page_status[idx]["gemini_attempt"] = 1
@@ -34780,17 +34498,7 @@ async def qbm_extract_all_pages(
     # PDF (the RAM guard above couldn't catch it in time since a single
     # window already blew the budget). Strict-sequential there; HF Space
     # (16GB) keeps the faster windowed pipeline.
-    # 2026-11-17 (user request): forced to 1 (strict-sequential) always,
-    # HF included. Multi-page batches were intermittently reporting a
-    # genuinely-non-empty page as "0 MCQ — confirmed via 5 retries +
-    # independent scan" when run with a sibling page concurrently (WINDOW=2
-    # on HF) -- a race under concurrent key/account contention, not a
-    # deterministic per-page or per-position bug (confirmed: no fixed page
-    # or batch-position always fails). Processing one page fully at a time,
-    # exactly like a single-page request, removes that contention entirely.
-    # Final merged CSV output is unchanged -- results still accumulate into
-    # the same `results` list/order regardless of window size.
-    WINDOW = 1
+    WINDOW = 1 if IS_RENDER else 2
 
     async def _extract_one_slotted(slot, idx, page_num, img):
         _qbm_key_offset_ctx.set(slot)
@@ -34799,12 +34507,6 @@ async def qbm_extract_all_pages(
         # different accounts from each other -- see
         # ordered_keys_avoiding_accounts() / _qbm_page_used_accounts_ctx.
         _qbm_page_used_accounts_ctx.set(set())
-        # Fresh empty dict per page, set BEFORE _extract_one's own
-        # _spawn_task(_run_extract()) call -- the spawned task's context is a
-        # COPY taken at spawn time, so it inherits this same dict OBJECT;
-        # mutating it (never reassigning) inside the spawned task is then
-        # visible here too. See _qbm_page_gemini_info_ctx comment.
-        _qbm_page_gemini_info_ctx.set({})
         return await _extract_one(idx, page_num, img)
 
     for start in range(0, len(pages), WINDOW):
@@ -35058,14 +34760,11 @@ async def process_qbm_pages(
                                 key = (m.get("question") or "").strip()[:80]
                                 if key in found_map:
                                     m["answer"] = found_map[key]
-                                    # 2026-11-17 (user request): /qbm
-                                    # explanation stays FULLY empty -- same
-                                    # fix as in qbm_extract_all_pages above,
-                                    # just clear the placeholder, never
-                                    # regenerate.
                                     m["explanation"] = (m.get("explanation") or "").replace(
                                         "Answer not found in source", ""
                                     ).strip()
+                                    if not m["explanation"]:
+                                        m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m["answer"], gemini_only=True)
                             unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
                 if unresolved:
                     for m in unresolved:
@@ -35253,8 +34952,7 @@ async def process_qbm_pages(
         await send_document(chat_id, buf.getvalue().encode("utf-8"),
             f"{topic}_QBM.csv",
             caption=f"📋 {topic} — {len(all_mcqs_csv)} MCQ (Extracted)",
-            mime_type="text/csv",
-            reply_to_message_id=status_msg_id)
+            mime_type="text/csv")
 
     if not csv_only and summary_pages:
         total_mcq_sum = sum(p["mcq_count"] for p in summary_pages)
@@ -35298,8 +34996,7 @@ async def process_qbm_pages(
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📝 Total MCQ Extracted: {total_mcq}\n📋 Pages: {len(display_pages)}\n⏱️ {mins}:{secs:02d}\n"
         f"🤖 Model Usage: {model_totals_line}\n"
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        reply_markup={"inline_keyboard": []})
+        "━━━━━━━━━━━━━━━━━━━━━━")
 
 # ============================================================
 # FEATURE: /rapid — CSV রিপ্লাই করে Topic দিলে, channel + local time select
@@ -38348,49 +38045,9 @@ async def webhook(request: Request):
 _LOCK_ACQUIRED_AT = {}  # uid -> timestamp the currently-held lock was acquired
 _STALE_LOCK_SECONDS = 600  # 10 min — generous even for the slowest /pdf jobs
 _USER_PENDING_QUEUE = {}  # uid -> list of queued update dicts waiting their turn
-_queue_item_id_counter = itertools.count(1)  # unique qid per queued item, for its own Cancel button
-_QUEUE_NOTICE_INFO = {}  # qid -> {"cid": chat_id, "msg_id": int, "cmd": str} -- so positions can be re-rendered after a mid-queue cancel
-_QUEUE_RENOTIFY_LOCK = asyncio.Lock()  # serialize renumber-edits so rapid cancels don't race each other
-_QUEUE_LAST_EDIT_AT = {}  # cid -> last edit_msg timestamp, for a small per-chat throttle on renumber bursts
 
 _USER_QUEUE_RUNNING = set()  # uid currently has an active drain-worker running
 _USER_LAST_STATUS = {}  # uid -> {"command": str, "stage": str, "started_at": float, "last_update_at": float}
-
-def _queue_notice_text(pos: int, total: int, cmd: str) -> str:
-    return (f"🔢 Task #{pos} / {total}\n"
-            f"────────────────\n"
-            f"📌 {cmd}")
-
-
-async def _renumber_queue_notices(uid: int):
-    """After a mid-queue cancel (or any time the queue shrinks from the
-    front), every REMAINING queued item's own notice message still shows its
-    OLD position number -- re-edit each one in place to its new position.
-    Serialized per-process (lock) so overlapping cancels never interleave
-    their edits, and throttled per-chat (min 1.2s gap) so a burst of cancels
-    on a long queue never trips Telegram's per-chat edit rate limit."""
-    async with _QUEUE_RENOTIFY_LOCK:
-        queue = _USER_PENDING_QUEUE.get(uid) or []
-        _total = len(queue)
-        for _pos, _u in enumerate(queue, start=1):
-            _qid = _u.get("_qid")
-            info = _QUEUE_NOTICE_INFO.get(_qid)
-            if not info:
-                continue
-            _cid = info["cid"]
-            _last = _QUEUE_LAST_EDIT_AT.get(_cid, 0.0)
-            _wait = 1.2 - (time.time() - _last)
-            if _wait > 0:
-                await asyncio.sleep(_wait)
-            try:
-                await edit_msg(_cid, info["msg_id"], _queue_notice_text(_pos, _total, info["cmd"]),
-                                reply_markup={"inline_keyboard": [[
-                                    {"text": "🛑 Cancel", "callback_data": f"queuecancel_{uid}_{_qid}"}
-                                ]]})
-            except Exception as e:
-                logger.warning(f"[Queue] renumber edit failed for qid={_qid}: {e}")
-            _QUEUE_LAST_EDIT_AT[_cid] = time.time()
-
 
 async def _drain_user_queue(uid: int):
     """Single worker per user that drains _USER_PENDING_QUEUE strictly in
@@ -38413,12 +38070,6 @@ async def _drain_user_queue(uid: int):
                 continue
             return
         update = queue.pop(0)
-        _QUEUE_NOTICE_INFO.pop(update.get("_qid"), None)
-        if queue:
-            # The item that just started running was Task #1 -- everyone
-            # left behind it shifts up by one position; re-edit their
-            # notices so the shown numbers stay correct.
-            _spawn_task(_renumber_queue_notices(uid))
         _LOCK_ACQUIRED_AT[uid] = time.time()
         try:
             await handle_message(update["message"])
@@ -38515,8 +38166,6 @@ async def process_update(update: dict):
                 _spawn_task(handle_message(_msg))
                 return
             if uid is not None:
-                _qid = next(_queue_item_id_counter)
-                update["_qid"] = _qid
                 _USER_PENDING_QUEUE.setdefault(uid, []).append(update)
                 if len(_USER_PENDING_QUEUE[uid]) > 20:
                     # Safety cap — drop oldest queued item rather than growing unbounded
@@ -38526,35 +38175,11 @@ async def process_update(update: dict):
                     # sathe sathe janano hocche je queue te ache (root cause
                     # of "stuck at 0%" reports: /csv silently queued behind a
                     # slow earlier command from same user, no feedback shown).
-                    # 2026-11-17 (user request): এখন কতো নম্বর task, command
-                    # কি ছিলো, এবং নিজের Cancel বাটন (শুধু এই queued item-টাই
-                    # বাতিল করে, চলমান কাজ না)।
                     _msg_obj = update.get("message", {})
                     _cid = _msg_obj.get("chat", {}).get("id")
-                    # 2026-11-17 (user request): show the FULL command text as
-                    # typed (not just the leading /word) -- falls back to the
-                    # doc filename/caption for file-based commands with no text.
-                    _txt = (_msg_obj.get("text") or "").strip()
-                    if not _txt:
-                        _doc = _msg_obj.get("document") or {}
-                        _txt = (_msg_obj.get("caption") or "").strip() or _doc.get("file_name") or "command"
-                    if len(_txt) > 200:
-                        _txt = _txt[:200] + "..."
-                    _pos = len(_USER_PENDING_QUEUE[uid])
-                    _orig_mid = _msg_obj.get("message_id")
+                    _txt = (_msg_obj.get("text") or "").strip().split()[0] if _msg_obj.get("text") else "command"
                     if _cid:
-                        async def _send_queue_notice(_cid=_cid, _pos=_pos, _txt=_txt, _qid=_qid, _uid=uid, _orig_mid=_orig_mid):
-                            r = await send_msg(
-                                _cid, _queue_notice_text(_pos, _pos, _txt),
-                                reply_markup={"inline_keyboard": [[
-                                    {"text": "🛑 Cancel", "callback_data": f"queuecancel_{_uid}_{_qid}"}
-                                ]]},
-                                reply_to_message_id=_orig_mid
-                            )
-                            _mid = r.get("result", {}).get("message_id") if isinstance(r, dict) else None
-                            if _mid:
-                                _QUEUE_NOTICE_INFO[_qid] = {"cid": _cid, "msg_id": _mid, "cmd": _txt}
-                        _spawn_task(_send_queue_notice())
+                        _spawn_task(send_msg(_cid, f"⏳ Ager command sesh howar opekkhay ache — {_txt} ektu porei shuru hobe..."))
                 if uid not in _USER_QUEUE_RUNNING:
                     # Stale-worker guard: if a previous worker for this uid
                     # died without clearing _USER_QUEUE_RUNNING (crash/restart
@@ -38876,12 +38501,6 @@ async def handle_message(msg: dict):
     # /special flow check (awaiting DM message / links / group id / banned words text)
     if uid in SPECIAL_INPUT_PENDING and msg.get("text") and not text.startswith("/"):
         consumed = await handle_special_text_input(msg)
-        if consumed:
-            return
-
-    # /prompt flow check (awaiting reply-to-edit text for a prompt override)
-    if uid in PROMPT_EDIT_PENDING and msg.get("text"):
-        consumed = await handle_prompt_text_input(msg)
         if consumed:
             return
 
@@ -39217,9 +38836,6 @@ async def handle_message(msg: dict):
         await handle_info2(msg)
     elif text == "/ramdebug" or text.startswith("/ramdebug "):
         await handle_ramdebug(msg)
-    elif text.strip() == "/prompt":
-        if await db_is_owner_or_admin(uid):
-            await show_prompt_main_menu(chat_id)
     elif text.startswith("/qbmprompt"):
         # /qbmprompt <new prompt text> -> permanently overrides the active
         # QBM extraction prompt (Call 1). Persists in Supabase (quiz_sessions,
@@ -40138,9 +39754,6 @@ async def handle_callback(query: dict):
         if data.startswith("imgmcq_"):
             _spawn_task(handle_imgmcq_callback(query))
             return
-        if data.startswith("prompt"):
-            await handle_prompt_callback(query)
-            return
         if data.startswith("pdfpg_"):
             rest = data[len("pdfpg_"):]
             sess_part, _, page_part = rest.rpartition("_")
@@ -40214,55 +39827,6 @@ async def handle_callback(query: dict):
                 return
             lms_job["cancel_requested"] = True
             await tg_post("answerCallbackQuery", {"callback_query_id": query.get("id"), "text": "🛑 বন্ধ করা হচ্ছে..."})
-            return
-        if data.startswith("queuecancel_"):
-            # 2026-11-17 (user request): cancels ONE specific queued (not-yet-
-            # started) command by its qid -- never touches the currently
-            # running job (that's jobcancel_'s job).
-            rest = data[len("queuecancel_"):]
-            parts = rest.rsplit("_", 1)
-            if len(parts) != 2 or not parts[0].lstrip("-").isdigit() or not parts[1].isdigit():
-                return
-            target_uid = int(parts[0])
-            target_qid = int(parts[1])
-            if uid != target_uid and not await db_is_owner_or_admin(uid):
-                return
-            queue = _USER_PENDING_QUEUE.get(target_uid) or []
-            removed_update = None
-            for _i, _u in enumerate(queue):
-                if _u.get("_qid") == target_qid:
-                    removed_update = queue.pop(_i)
-                    break
-            _r_info = _QUEUE_NOTICE_INFO.pop(target_qid, None)
-            if removed_update is None:
-                await tg_post("answerCallbackQuery", {"callback_query_id": query.get("id"),
-                                                        "text": "এই কাজটি ইতিমধ্যে শুরু হয়ে গেছে বা বাতিল হয়ে গেছে।"})
-                return
-            _r_txt = (_r_info or {}).get("cmd") or "command"
-            await tg_post("answerCallbackQuery", {"callback_query_id": query.get("id"), "text": "🛑 বাতিল করা হলো"})
-            # 2026-11-17 (user request): delete the queued-task's own notice
-            # message (the one carrying the Cancel button) outright instead
-            # of leaving it sitting there + sending a separate standalone
-            # "বাতিল করা হলো" message -- one less message, no stale button.
-            _del_cid = (_r_info or {}).get("cid") or chat_id
-            _del_mid = (_r_info or {}).get("msg_id")
-            _deleted_ok = False
-            if _del_mid:
-                try:
-                    _del_resp = await tg_post("deleteMessage", {"chat_id": _del_cid, "message_id": _del_mid})
-                    _deleted_ok = bool(_del_resp and _del_resp.get("ok"))
-                except Exception as _del_e:
-                    logger.warning(f"[queuecancel] failed to delete notice msg {_del_mid}: {_del_e}")
-            if not _deleted_ok:
-                # Telegram refuses deletes on messages older than 48h (or
-                # various edge cases) -- fall back to the old standalone
-                # notice so the user still gets confirmation instead of
-                # silence when delete isn't possible.
-                await send_msg(chat_id, f"🛑 বাতিল করা হলো: {_r_txt} (queue থেকে সরানো হয়েছে)")
-            # 2026-11-17 (user request): mid-queue cancel shifts everyone
-            # behind it up by one position -- re-edit their notices in place
-            # so the shown "Task #N" never goes stale/wrong.
-            _spawn_task(_renumber_queue_notices(target_uid))
             return
         if data.startswith("jobcancel_"):
             rest = data[len("jobcancel_"):]
@@ -40529,10 +40093,6 @@ async def handle_callback(query: dict):
             orig_uid = int(parts[2])
             if uid != orig_uid:
                 return
-            # 2026-11-17 (user request): delete the "MCQ কোথা থেকে আসবে?"
-            # choose-button message the instant a choice is made, instead
-            # of leaving it sitting in the chat.
-            _spawn_task(tg_post("deleteMessage", {"chat_id": chat_id, "message_id": msg_id}))
             await handle_img_source(source, uid, chat_id, user)
 
         elif data.startswith("imgchannel_"):
