@@ -1015,10 +1015,28 @@ def _wrap_dl_progress_cb(chat_id, status_msg_id, inner_cb):
     return _wrapped
 
 
+async def _dl_cancel_delete_msg(chat_id, status_msg_id):
+    """Call ONLY from the dlcancel_ callback handler, right after setting
+    the flag. Deletes the progress message WITHOUT touching the flag --
+    popping it here (as the old combined _dl_cancel_cleanup did) raced
+    with the download's own in-flight progress_cb check: the flag could
+    be cleared before that check ever ran, so _DownloadCancelled never
+    got raised and the transfer kept running in the background even
+    though the message was already gone. The flag itself is cleared
+    later by _dl_cancel_cleanup, once the except-block has actually
+    caught the cancellation."""
+    try:
+        await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": status_msg_id})
+    except Exception as e:
+        logger.warning(f"[dlcancel] failed to delete status msg {status_msg_id}: {e}")
+
+
 async def _dl_cancel_cleanup(chat_id, status_msg_id):
-    """Call this from the dlcancel_ callback handler AND from the
-    try/except around every wrapped download -- deletes the progress
-    message and clears the flag so stale entries don't accumulate."""
+    """Call this from the try/except around every wrapped download, AFTER
+    _DownloadCancelled has actually been caught -- clears the flag so
+    stale entries don't accumulate, and deletes the progress message as a
+    fallback in case the dlcancel_ callback's own delete (above) didn't
+    fire (e.g. a race where this except-block runs first)."""
     key = f"{chat_id}_{status_msg_id}"
     _DL_CANCEL_FLAGS.pop(key, None)
     try:
@@ -40427,7 +40445,7 @@ async def handle_callback(query: dict):
                 return
             _DL_CANCEL_FLAGS[f"{target_chat}_{dl_status_msg_id}"] = True
             await tg_post("answerCallbackQuery", {"callback_query_id": query.get("id"), "text": "🛑 Download বাতিল করা হলো"})
-            await _dl_cancel_cleanup(target_chat, dl_status_msg_id)
+            await _dl_cancel_delete_msg(target_chat, dl_status_msg_id)
             return
         if data.startswith("jobcancel_"):
             rest = data[len("jobcancel_"):]
