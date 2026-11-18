@@ -39813,9 +39813,12 @@ async def handle_callback(query: dict):
             if not await db_is_owner_or_admin(uid):
                 return
             running_job_id = CURRENT_JOB_ID.get(target_chat)
-            if button_job_id is not None and button_job_id != running_job_id:
-                # এই বাটনটা আর সক্রিয় job-এর না (হয় আগেই শেষ হয়ে গেছে, নয়তো
-                # নতুন job শুরু হয়ে গেছে) — তাই এটা কিছু cancel করবে না।
+            if button_job_id is not None and button_job_id != running_job_id and not ACTIVE_JOB_LABEL.get(target_chat):
+                # job_id মিসম্যাচ এবং সত্যিই কোনো job চলছে না (ACTIVE_JOB_LABEL খালি) --
+                # তবেই এই বাটনকে stale ধরা হবে। কোনো job চলমান থাকলে job_id ভিন্ন
+                # হলেও (অন্তর্বর্তী reset/retry-এর কারণে) cancel সবসময় কার্যকর হবে,
+                # নইলে ইউজারের Cancel ক্লিক silently ignore হয়ে যেত এবং কাজ
+                # restart হয়ে যাচ্ছে বলে মনে হতো (user report 2026-11-18).
                 await send_msg(chat_id, "ℹ️ এই কাজটি ইতিমধ্যে শেষ হয়ে গেছে, তাই এই বাটন আর কার্যকর নয়।")
                 return
             CANCEL_FLAGS[target_chat] = True
