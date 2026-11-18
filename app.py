@@ -30681,9 +30681,15 @@ async def _handle_topic_impl(msg: dict):
 
     status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}")
     status_msg_id = status_r.get("result", {}).get("message_id") if status_r.get("ok") else None
+    # 2026-11-18 (user request): Cancel button on every file-download
+    # progress message -- see _handle_qbm_impl for the full explanation.
+    if status_msg_id:
+        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}",
+                             reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
+    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, None) if status_msg_id else None
 
     try:
-        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id,
+        pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_cb_wrapped, chat_id=chat_id,
                                                 message_id=reply["message_id"], file_unique_id=file_unique_id)
         ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
         if not ok:
@@ -30784,6 +30790,10 @@ async def _handle_topic_impl(msg: dict):
             await edit_msg(chat_id, status_msg_id,
                 f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।")
 
+    except _DownloadCancelled:
+        # 2026-11-18 (user request): download-phase Cancel button pressed;
+        # dlcancel_ callback already deleted the progress message.
+        pass
     except Exception as e:
         logger.error(f"[TOPIC] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -30848,9 +30858,15 @@ async def _handle_eng_impl(msg: dict):
 
     status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}")
     status_msg_id = status_r.get("result", {}).get("message_id") if status_r.get("ok") else None
+    # 2026-11-18 (user request): Cancel button on every file-download
+    # progress message -- see _handle_qbm_impl for the full explanation.
+    if status_msg_id:
+        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}",
+                             reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
+    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, None) if status_msg_id else None
 
     try:
-        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id,
+        pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_cb_wrapped, chat_id=chat_id,
                                                 message_id=reply["message_id"], file_unique_id=file_unique_id)
         ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
         if not ok:
@@ -30951,6 +30967,10 @@ async def _handle_eng_impl(msg: dict):
             await edit_msg(chat_id, status_msg_id,
                 f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।")
 
+    except _DownloadCancelled:
+        # 2026-11-18 (user request): download-phase Cancel button pressed;
+        # dlcancel_ callback already deleted the progress message.
+        pass
     except Exception as e:
         logger.error(f"[ENG] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -31020,9 +31040,15 @@ async def handle_biot(msg: dict):
 
     status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}")
     status_msg_id = status_r.get("result", {}).get("message_id") if status_r.get("ok") else None
+    # 2026-11-18 (user request): Cancel button on every file-download
+    # progress message -- see _handle_qbm_impl for the full explanation.
+    if status_msg_id:
+        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}",
+                             reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
+    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, None) if status_msg_id else None
 
     try:
-        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id,
+        pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_cb_wrapped, chat_id=chat_id,
                                                 message_id=reply["message_id"], file_unique_id=file_unique_id)
         ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
         if not ok:
@@ -31084,6 +31110,10 @@ async def handle_biot(msg: dict):
         else:
             await send_msg(chat_id, result[:4000])
 
+    except _DownloadCancelled:
+        # 2026-11-18 (user request): download-phase Cancel button pressed;
+        # dlcancel_ callback already deleted the progress message.
+        pass
     except Exception as e:
         logger.error(f"[BIOT] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -31123,9 +31153,15 @@ async def _handle_bio_impl(msg: dict):
 
     status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}")
     status_msg_id = status_r.get("result", {}).get("message_id") if status_r.get("ok") else None
+    # 2026-11-18 (user request): Cancel button on every file-download
+    # progress message -- see _handle_qbm_impl for the full explanation.
+    if status_msg_id:
+        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}",
+                             reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
+    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, None) if status_msg_id else None
 
     try:
-        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id,
+        pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_cb_wrapped, chat_id=chat_id,
                                                 message_id=reply["message_id"], file_unique_id=file_unique_id)
         ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
         if not ok:
@@ -31233,6 +31269,10 @@ async def _handle_bio_impl(msg: dict):
             await edit_msg(chat_id, status_msg_id,
                 f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।")
 
+    except _DownloadCancelled:
+        # 2026-11-18 (user request): download-phase Cancel button pressed;
+        # dlcancel_ callback already deleted the progress message.
+        pass
     except Exception as e:
         logger.error(f"[BIO] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -31298,9 +31338,15 @@ async def _handle_unmesh_impl(msg: dict):
     status_r = await send_msg(chat_id, ("✅ Cached PDF ব্যবহার হচ্ছে...\n📄 " + file_name) if _is_cache_hit else
         f"⏳ PDF download হচ্ছে...\n📄 {file_name}")
     status_msg_id = status_r.get("result", {}).get("message_id") if status_r.get("ok") else None
+    # 2026-11-18 (user request): Cancel button on every file-download
+    # progress message -- see _handle_qbm_impl for the full explanation.
+    if status_msg_id and not _is_cache_hit:
+        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}",
+                             reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
+    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, None) if status_msg_id else None
 
     try:
-        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id,
+        pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_cb_wrapped, chat_id=chat_id,
                                                 message_id=reply["message_id"], file_unique_id=file_unique_id)
         ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
         if not ok:
@@ -31436,6 +31482,10 @@ async def _handle_unmesh_impl(msg: dict):
             f"🔖 build: {UNMESH_CODE_VERSION_MARKER}"
         )
 
+    except _DownloadCancelled:
+        # 2026-11-18 (user request): download-phase Cancel button pressed;
+        # dlcancel_ callback already deleted the progress message.
+        pass
     except Exception as e:
         logger.error(f"[UNMESH] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -31502,9 +31552,15 @@ async def _handle_bcs_impl(msg: dict):
     status_r = await send_msg(chat_id, ("✅ Cached PDF ব্যবহার হচ্ছে...\n📄 " + file_name) if _is_cache_hit else
         f"⏳ PDF download হচ্ছে...\n📄 {file_name}")
     status_msg_id = status_r.get("result", {}).get("message_id") if status_r.get("ok") else None
+    # 2026-11-18 (user request): Cancel button on every file-download
+    # progress message -- see _handle_qbm_impl for the full explanation.
+    if status_msg_id and not _is_cache_hit:
+        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}",
+                             reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
+    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, None) if status_msg_id else None
 
     try:
-        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id,
+        pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_cb_wrapped, chat_id=chat_id,
                                                 message_id=reply["message_id"], file_unique_id=file_unique_id)
         ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
         if not ok:
@@ -31644,6 +31700,10 @@ async def _handle_bcs_impl(msg: dict):
             f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।"
         )
 
+    except _DownloadCancelled:
+        # 2026-11-18 (user request): download-phase Cancel button pressed;
+        # dlcancel_ callback already deleted the progress message.
+        pass
     except Exception as e:
         logger.error(f"[BCS] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -31714,9 +31774,15 @@ async def handle_chemt(msg: dict):
 
     status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}")
     status_msg_id = status_r.get("result", {}).get("message_id") if status_r.get("ok") else None
+    # 2026-11-18 (user request): Cancel button on every file-download
+    # progress message -- see _handle_qbm_impl for the full explanation.
+    if status_msg_id:
+        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}",
+                             reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
+    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, None) if status_msg_id else None
 
     try:
-        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id,
+        pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_cb_wrapped, chat_id=chat_id,
                                                 message_id=reply["message_id"], file_unique_id=file_unique_id)
         ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
         if not ok:
@@ -31780,6 +31846,10 @@ async def handle_chemt(msg: dict):
         else:
             await send_msg(chat_id, result[:4000])
 
+    except _DownloadCancelled:
+        # 2026-11-18 (user request): download-phase Cancel button pressed;
+        # dlcancel_ callback already deleted the progress message.
+        pass
     except Exception as e:
         logger.error(f"[CHEMT] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -31819,9 +31889,15 @@ async def _handle_chem_impl(msg: dict):
 
     status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}")
     status_msg_id = status_r.get("result", {}).get("message_id") if status_r.get("ok") else None
+    # 2026-11-18 (user request): Cancel button on every file-download
+    # progress message -- see _handle_qbm_impl for the full explanation.
+    if status_msg_id:
+        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}",
+                             reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
+    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, None) if status_msg_id else None
 
     try:
-        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id,
+        pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_cb_wrapped, chat_id=chat_id,
                                                 message_id=reply["message_id"], file_unique_id=file_unique_id)
         ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
         if not ok:
@@ -31931,6 +32007,10 @@ async def _handle_chem_impl(msg: dict):
             await edit_msg(chat_id, status_msg_id,
                 f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।")
 
+    except _DownloadCancelled:
+        # 2026-11-18 (user request): download-phase Cancel button pressed;
+        # dlcancel_ callback already deleted the progress message.
+        pass
     except Exception as e:
         logger.error(f"[CHEM] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
