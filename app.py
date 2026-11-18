@@ -38386,6 +38386,7 @@ _STALE_LOCK_SECONDS = 600  # 10 min — generous even for the slowest /pdf jobs
 _USER_PENDING_QUEUE = {}  # uid -> list of queued update dicts waiting their turn
 
 _USER_QUEUE_RUNNING = set()  # uid currently has an active drain-worker running
+_USER_RUNNING_COMMAND = {}  # uid -> command text currently running (for queue-wait message)
 _USER_LAST_STATUS = {}  # uid -> {"command": str, "stage": str, "started_at": float, "last_update_at": float}
 
 async def _drain_user_queue(uid: int):
@@ -38410,6 +38411,13 @@ async def _drain_user_queue(uid: int):
             return
         update = queue.pop(0)
         _LOCK_ACQUIRED_AT[uid] = time.time()
+        # 2026-11-18 (user request): record exactly which command this
+        # worker is now running, so a LATER queued command for the same
+        # uid can name it in the "⏳ waiting" message instead of a vague
+        # "ager command". Cleared in finally below once this one finishes.
+        _running_txt = (update.get("message", {}).get("text") or "").strip()
+        _running_cmd = _running_txt.split()[0] if _running_txt else "আগের command"
+        _USER_RUNNING_COMMAND[uid] = _running_cmd
         try:
             await handle_message(update["message"])
             task = _active_command_task.pop(uid, None)
@@ -38419,6 +38427,7 @@ async def _drain_user_queue(uid: int):
             logger.error(f"[Queue] uid={uid} command error: {e}")
         finally:
             _LOCK_ACQUIRED_AT.pop(uid, None)
+            _USER_RUNNING_COMMAND.pop(uid, None)
 
 _seen_update_ids = deque(maxlen=2000)
 _seen_update_ids_set = set()
@@ -38517,8 +38526,18 @@ async def process_update(update: dict):
                     _msg_obj = update.get("message", {})
                     _cid = _msg_obj.get("chat", {}).get("id")
                     _txt = (_msg_obj.get("text") or "").strip().split()[0] if _msg_obj.get("text") else "command"
+                    _mid = _msg_obj.get("message_id")
                     if _cid:
-                        _spawn_task(send_msg(_cid, f"⏳ Ager command sesh howar opekkhay ache — {_txt} ektu porei shuru hobe..."))
+                        # 2026-11-18 (user request): name the EXACT command
+                        # currently running for this uid on its own line
+                        # (not a vague "ager command"), and reply directly
+                        # to the incoming message that just got queued.
+                        _now_running = _USER_RUNNING_COMMAND.get(uid, "আগের command")
+                        _wait_text = (
+                            f"⏳ Ager command sesh howar opekkhay ache — {_txt} ektu porei shuru hobe...\n"
+                            f"🔄 এখন চলছে: {_now_running}"
+                        )
+                        _spawn_task(send_msg(_cid, _wait_text, reply_to_message_id=_mid))
                 if uid not in _USER_QUEUE_RUNNING:
                     # Stale-worker guard: if a previous worker for this uid
                     # died without clearing _USER_QUEUE_RUNNING (crash/restart
