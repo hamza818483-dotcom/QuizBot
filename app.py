@@ -13464,10 +13464,24 @@ async def _resume_page_job(job_row: dict):
         # instead of silently retrying.
         if job_type in ("qbm", "qbm_extract"):
             logger.warning(f"[Page-Resume] /qbm auto-resume disabled -- dropping job_id={job_id} (job_type={job_type}) instead of retrying")
+            # 2026-11-18 (user request): edit the SAME live dashboard
+            # message (status_msg_id, saved on job creation) instead of
+            # sending a brand-new separate "restart হয়েছিল" message --
+            # the user is looking at the stuck "⏳ Page 03: Processing..."
+            # dashboard, so update THAT in place to show it's stopped.
+            _dash_msg_id = job_row.get("status_msg_id")
             try:
-                await send_msg(chat_id, "🔄 Bot restart হয়েছিল — /qbm auto-resume আপাতত বন্ধ আছে, দয়া করে /qbm আবার চালাও।")
+                if _dash_msg_id:
+                    await edit_msg(chat_id, _dash_msg_id,
+                        "⚠️ Bot restart হয়েছিল — এই job বন্ধ হয়ে গেছে।\n"
+                        "দয়া করে /qbm আবার চালাও।")
+                else:
+                    await send_msg(chat_id, "🔄 Bot restart হয়েছিল — /qbm auto-resume আপাতত বন্ধ আছে, দয়া করে /qbm আবার চালাও।")
             except Exception:
-                pass
+                try:
+                    await send_msg(chat_id, "🔄 Bot restart হয়েছিল — /qbm auto-resume আপাতত বন্ধ আছে, দয়া করে /qbm আবার চালাও।")
+                except Exception:
+                    pass
             await db_finish_page_job(job_id)
             return
 
