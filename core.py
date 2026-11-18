@@ -336,7 +336,12 @@ async def d1_set(key: str, value: dict, ttl: int = 86400):
 async def d1_get(key: str) -> dict:
     try:
         c = await _get_shared_http_client()
-        r = await c.get(f"{CF_WORKER_URL}/d1/get", params={"key": key}, timeout=15)
+        for _a in range(3):  # transient CF/D1 HTTP 500s (seen at startup) -- reads are safe to retry
+            r = await c.get(f"{CF_WORKER_URL}/d1/get", params={"key": key}, timeout=15)
+            if r.status_code >= 500 and _a < 2:
+                await asyncio.sleep(0.4 * (_a + 1))
+                continue
+            break
         if r.text.strip():
             data = r.json()
             val = data.get("value")
@@ -361,7 +366,23 @@ async def d1_query(sql: str, params: list = None, is_select: bool = True, suppre
     try:
         body = {"sql": sql, "params": params or [], "token": D1_TOKEN}
         c = await _get_shared_http_client()
-        r = await c.post(f"{CF_WORKER_URL}/d1/query", json=body, timeout=15)
+        # 2026-11-18: CF D1 worker returns bursts of transient HTTP 500s
+        # (seen in logs: 9 in a row, plus on startup). Reads are idempotent,
+        # so retry SELECTs up to 3x with short backoff before giving up.
+        # Writes are NOT retried (a 500 may still have executed the INSERT).
+        _attempts = 3 if is_select else 1
+        for _a in range(_attempts):
+            try:
+                r = await c.post(f"{CF_WORKER_URL}/d1/query", json=body, timeout=15)
+            except Exception:
+                if _a < _attempts - 1:
+                    await asyncio.sleep(0.4 * (_a + 1))
+                    continue
+                raise
+            if r.status_code >= 500 and _a < _attempts - 1:
+                await asyncio.sleep(0.4 * (_a + 1))
+                continue
+            break
         try:
             data = r.json()
         except Exception:
@@ -1603,6 +1624,95 @@ async def _get_pyro_client():
         _pyro_client = client
     return _pyro_client
 
+def _is_dl_cancel(e: BaseException) -> bool:
+    """True if e is app.py's _DownloadCancelled (raised from the Cancel-button
+    progress wrapper). core.py can't import it (circular), so match by name.
+    Every progress_cb try/except in the download paths below MUST re-raise
+    this, otherwise the Cancel button only deletes the message while the
+    transfer keeps running (the original batch 1-3 behaviour)."""
+    return type(e).__name__ == "_DownloadCancelled"
+
+
+async def _pyro_parallel_download(client, media, file_size: int, progress_cb=None, concurrency: int = 8) -> bytes:
+    """Download one Telegram file with `concurrency` upload.GetFile requests
+    in flight at once over a SINGLE media session.
+
+    Why: pyrogram's stock get_file()/download_media() fetches 1MiB chunks
+    strictly one-after-another, so throughput = 1MiB / round-trip-latency
+    (~0.6 MB/s from HF to DC5 in production logs: 192.8MB took ~334s).
+    max_concurrent_transmissions only parallelises DIFFERENT files, never
+    chunks of one file. Pipelining the GetFile calls over the same session is
+    allowed by MTProto and typically gives several x the speed.
+    Raises on any failure so the caller can fall back to download_media()."""
+    from pyrogram import raw
+    from pyrogram.file_id import FileId, FileType
+    from pyrogram.session import Session
+    from pyrogram.session.auth import Auth
+
+    fid = FileId.decode(media.file_id)
+    if fid.file_type == FileType.PHOTO:
+        location = raw.types.InputPhotoFileLocation(
+            id=fid.media_id, access_hash=fid.access_hash,
+            file_reference=fid.file_reference, thumb_size=fid.thumbnail_size)
+    else:
+        location = raw.types.InputDocumentFileLocation(
+            id=fid.media_id, access_hash=fid.access_hash,
+            file_reference=fid.file_reference, thumb_size=fid.thumbnail_size)
+
+    chunk = 1024 * 1024
+    n_chunks = (file_size + chunk - 1) // chunk
+    dc_id = fid.dc_id
+    own_dc = await client.storage.dc_id()
+    test_mode = await client.storage.test_mode()
+    session = Session(
+        client, dc_id,
+        await Auth(client, dc_id, test_mode).create() if dc_id != own_dc else await client.storage.auth_key(),
+        test_mode, is_media=True)
+    buf = bytearray(file_size)
+    done_bytes = 0
+    t0 = time.time()
+    try:
+        await session.start()
+        if dc_id != own_dc:
+            exported = await client.invoke(raw.functions.auth.ExportAuthorization(dc_id=dc_id))
+            await session.invoke(raw.functions.auth.ImportAuthorization(id=exported.id, bytes=exported.bytes))
+
+        sem = asyncio.Semaphore(max(1, concurrency))
+
+        async def _fetch(i: int):
+            nonlocal done_bytes
+            async with sem:
+                r = await session.invoke(
+                    raw.functions.upload.GetFile(location=location, offset=i * chunk, limit=chunk),
+                    sleep_threshold=30)
+                if not isinstance(r, raw.types.upload.File):
+                    raise Exception("unexpected GetFile result (CDN redirect) -- falling back")
+                b = r.bytes
+                buf[i * chunk: i * chunk + len(b)] = b
+                done_bytes += len(b)
+                if progress_cb:
+                    await progress_cb(min(done_bytes, file_size), file_size)
+
+        tasks = [asyncio.create_task(_fetch(i)) for i in range(n_chunks)]
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+    finally:
+        try:
+            await session.stop()
+        except Exception:
+            pass
+    if done_bytes < file_size:
+        raise Exception(f"parallel download incomplete: {done_bytes}/{file_size}")
+    logger.info(f"[pyrogram] parallel download done: {file_size/1048576:.1f}MB in {time.time()-t0:.1f}s "
+                f"({file_size/1048576/max(time.time()-t0,0.01):.2f} MB/s, {concurrency}x)")
+    return bytes(buf)
+
+
 async def download_large_file_pyrogram(chat_id: int, message_id: int, progress_cb=None) -> Optional[bytes]:
     try:
         client = await _get_pyro_client()
@@ -1654,8 +1764,21 @@ async def download_large_file_pyrogram(chat_id: int, message_id: int, progress_c
                     res = progress_cb(current, total)
                     if asyncio.iscoroutine(res):
                         await res
-                except Exception:
+                except Exception as _pe:
+                    if _is_dl_cancel(_pe):
+                        raise  # Cancel button -> abort the transfer
                     pass
+
+        # Fast path: pipelined parallel GetFile (see _pyro_parallel_download).
+        # Any non-cancel failure falls through to the stock sequential path.
+        _media = msg.document or msg.video or msg.audio
+        if expected_sz and expected_sz >= 3 * 1024 * 1024:
+            try:
+                return await _pyro_parallel_download(client, _media, expected_sz, progress_cb=_progress_fn)
+            except Exception as _pde:
+                if _is_dl_cancel(_pde):
+                    raise
+                logger.warning(f"[pyrogram] parallel download failed ({type(_pde).__name__}: {_pde}), falling back to sequential download_media")
 
         file_bytes = await client.download_media(msg, in_memory=True, progress=_progress_fn)
         if file_bytes is None:
@@ -1677,6 +1800,8 @@ async def download_large_file_pyrogram(chat_id: int, message_id: int, progress_c
             return None
         return data
     except Exception as e:
+        if _is_dl_cancel(e):
+            raise
         logger.error(f"[pyrogram] download error: {e}")
         # Underlying MTProto TCP socket died (e.g. "socket.send() raised
         # exception" / "Connection lost") -- the cached _pyro_client keeps
@@ -1720,7 +1845,9 @@ async def download_large_file_to_disk(chat_id: int, message_id: int, dest_path: 
                     res = progress_cb(current, total)
                     if asyncio.iscoroutine(res):
                         await res
-                except Exception:
+                except Exception as _pe:
+                    if _is_dl_cancel(_pe):
+                        raise
                     pass
 
         result = await client.download_media(msg, file_name=dest_path, progress=_progress_fn)
@@ -1738,6 +1865,8 @@ async def download_large_file_to_disk(chat_id: int, message_id: int, dest_path: 
             return None
         return result
     except Exception as e:
+        if _is_dl_cancel(e):
+            raise
         logger.error(f"[pyrogram] disk download error: {e}")
         err_str = str(e).lower()
         if any(s in err_str for s in ("connection lost", "socket.send", "not connected",
@@ -1861,7 +1990,9 @@ async def download_tg_file(file_id: str, progress_cb=None,
                         res = progress_cb(downloaded, total_size)
                         if asyncio.iscoroutine(res):
                             await res
-                    except Exception:
+                    except Exception as _pe:
+                        if _is_dl_cancel(_pe):
+                            raise
                         pass
         data = buf.getvalue()
         # BUG FIX: a stream that ends early (connection drop, silent
@@ -1896,6 +2027,8 @@ async def download_tg_file(file_id: str, progress_cb=None,
             try:
                 return await _stream_download(url)
             except Exception as e:
+                if _is_dl_cancel(e):
+                    raise
                 last_err = e
                 logger.warning(f"[Download] stream attempt {i+1}/{attempts} failed: {e}")
                 if i < attempts - 1:
@@ -1907,6 +2040,8 @@ async def download_tg_file(file_id: str, progress_cb=None,
     try:
         return await _stream_with_retry(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}")
     except Exception as e:
+        if _is_dl_cancel(e):
+            raise
         logger.warning(f"[Download] Direct Telegram failed, trying CF proxy: {e}")
     return await _stream_with_retry(f"{CF_WORKER_URL}/tg-file?path={file_path}")
 
