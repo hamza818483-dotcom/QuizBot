@@ -6429,7 +6429,20 @@ async def _gemini_verify_raw_text(img, prompt: str, _fallback_model: str = None)
             return ""
         from google import genai as gai
         from google.genai import types
-        from pdf_handler import image_to_base64, _is_gemini_key_exhausted_today
+        from pdf_handler import (image_to_base64, _is_gemini_key_exhausted_today,
+                                  _model_in_cooldown, _note_model_outage_fail,
+                                  _note_model_success, _next_fallback_model, _first_available_model)
+        # 2026-11-18: 5-min circuit breaker -- skip straight to a model
+        # that isn't already in cooldown from an earlier call's 3-in-a-row
+        # backend outage, instead of re-proving the same overload here.
+        _this_model = _fallback_model if _fallback_model is not None else "gemini-3.6-flash"
+        if _model_in_cooldown(_this_model):
+            _skip_to = _first_available_model()
+            if _skip_to != _this_model:
+                logger.warning(f"[GeminiVerify] {_this_model} is in 5-min cooldown (recent backend overload) — skipping straight to {_skip_to}")
+                return await _gemini_verify_raw_text(img, prompt,
+                                                      _fallback_model=(None if _skip_to == "gemini-3.6-flash" else _skip_to))
+        _consec_outage_fails = 0
         img_b64 = image_to_base64(img)
         if _fallback_model is not None:
             # Separate quota bucket from gemini-3.6-flash -- the shared
@@ -6470,9 +6483,20 @@ async def _gemini_verify_raw_text(img, prompt: str, _fallback_model: str = None)
                         timeout=_timeout
                     )
                 key_rotator.mark_healthy(key)
+                _note_model_success(_fallback_model or "gemini-3.6-flash")
+                _consec_outage_fails = 0
                 return response.text or ""
             except asyncio.TimeoutError:
                 logger.warning(f"[GeminiVerify] key {key[:12]}... timed out ({_timeout}s), trying next key")
+                _consec_outage_fails += 1
+                if _consec_outage_fails >= 3:
+                    _cur_model_name = _fallback_model or "gemini-3.6-flash"
+                    _note_model_outage_fail(_cur_model_name)
+                    _next_model = _next_fallback_model(_cur_model_name)
+                    if _next_model != _cur_model_name:
+                        logger.warning(f"[GeminiVerify] 3 consecutive timeouts on {_cur_model_name} — switching to {_next_model} immediately ({_cur_model_name} now in 5-min cooldown)")
+                        return await _gemini_verify_raw_text(img, prompt,
+                                                              _fallback_model=(None if _next_model == "gemini-3.6-flash" else _next_model))
                 continue
             except Exception as e:
                 from pdf_handler import _gemini_full_error_text
@@ -6484,12 +6508,34 @@ async def _gemini_verify_raw_text(img, prompt: str, _fallback_model: str = None)
                     # quota bucket from gemini-3.6-flash.
                     if _fallback_model is None:
                         key_rotator.mark_rate_limited(key, daily_exhausted=daily)
+                    _consec_outage_fails = 0
                 elif ("SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper()
                       or "UNAUTHENTICATED" in err_str.upper() or "ACCOUNT_STATE_INVALID" in err_str.upper()
                       or "401" in err_str):
                     key_rotator.mark_banned(key, reason=err_str[:200])
                     key_rotator.record_account_error(key)
                     _dead_accounts.add(key_rotator.account_of(key))
+                    _consec_outage_fails = 0
+                else:
+                    # 2026-11-18: 503/504/overload/not-found-for-this-key are
+                    # whole-model backend issues, not this key's fault -- 3 in
+                    # a row triggers the shared 5-min model cooldown + switch.
+                    _is_outage_err = ("UNAVAILABLE" in err_str or "503" in err_str or "504" in err_str
+                                      or "DEADLINE_EXCEEDED" in err_str or "overloaded" in err_str.lower()
+                                      or "404" in err_str or "NOT_FOUND" in err_str.upper()
+                                      or "limit: 0" in err_str or "'limit': 0" in err_str)
+                    if _is_outage_err:
+                        _consec_outage_fails += 1
+                        if _consec_outage_fails >= 3:
+                            _cur_model_name = _fallback_model or "gemini-3.6-flash"
+                            _note_model_outage_fail(_cur_model_name)
+                            _next_model = _next_fallback_model(_cur_model_name)
+                            if _next_model != _cur_model_name:
+                                logger.warning(f"[GeminiVerify] 3 consecutive backend-outage failures on {_cur_model_name} — switching to {_next_model} immediately ({_cur_model_name} now in 5-min cooldown)")
+                                return await _gemini_verify_raw_text(img, prompt,
+                                                                      _fallback_model=(None if _next_model == "gemini-3.6-flash" else _next_model))
+                    else:
+                        _consec_outage_fails = 0
                 logger.warning(f"[GeminiVerify] key {key[:12]}... failed, trying next key: {e}")
                 continue
         if _fallback_model is None:
@@ -17685,10 +17731,23 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str, _fallback_model: str
     gemini-3.5-flash-lite -- a separate free-tier quota bucket from
     gemini-3.6-flash (still Gemini-only, no other provider touched)."""
     try:
-        from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today
+        from pdf_handler import (key_rotator, image_to_base64, _is_gemini_key_exhausted_today,
+                                  _model_in_cooldown, _note_model_outage_fail,
+                                  _note_model_success, _next_fallback_model, _first_available_model)
         if not key_rotator.keys:
             logger.warning("[Dagano] no Gemini keys configured")
             return ""
+        # 2026-11-18: 5-min circuit breaker -- skip straight to a model
+        # that isn't already in cooldown from an earlier call's 3-in-a-row
+        # backend outage, instead of re-proving the same overload here.
+        _this_model = _fallback_model if _fallback_model is not None else "gemini-3.6-flash"
+        if _model_in_cooldown(_this_model):
+            _skip_to = _first_available_model()
+            if _skip_to != _this_model:
+                logger.warning(f"[Dagano] {_this_model} is in 5-min cooldown (recent backend overload) — skipping straight to {_skip_to}")
+                return await _dagano_gemini_raw_multi(imgs, prompt,
+                                                       _fallback_model=(None if _skip_to == "gemini-3.6-flash" else _skip_to))
+        _consec_outage_fails = 0
         if _fallback_model is None and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
             logger.warning("[Dagano] all gemini-3.6-flash keys already known daily-exhausted — retrying with gemini-3.5-flash-lite (separate quota)")
             return await _dagano_gemini_raw_multi(imgs, prompt, _fallback_model="gemini-3.5-flash-lite")
@@ -17734,13 +17793,18 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str, _fallback_model: str
                 continue
             key_rotator.record_call(key)
             try:
-                _dagano_timeout = 40 if idx == 0 else 25
+                # 2026-11-18: per-request timeout for multi-image calls is
+                # 45s (more images/pages per call than the single-image
+                # path, so it needs more headroom than that path's 35s).
+                _dagano_timeout = 45
                 async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(
                         asyncio.to_thread(_call, key, _fallback_model or "gemini-3.6-flash"),
                         timeout=_dagano_timeout
                     )
                 key_rotator.mark_healthy(key)
+                _note_model_success(_fallback_model or "gemini-3.6-flash")
+                _consec_outage_fails = 0
                 finish_reason = None
                 try:
                     finish_reason = response.candidates[0].finish_reason
@@ -17752,7 +17816,16 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str, _fallback_model: str
                 _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Gemini")
                 return response.text or ""
             except asyncio.TimeoutError:
-                logger.warning(f"[Dagano] Gemini key {key[:12]}... multi-image call timed out (60s), trying next key")
+                logger.warning(f"[Dagano] Gemini key {key[:12]}... multi-image call timed out ({_dagano_timeout}s), trying next key")
+                _consec_outage_fails += 1
+                if _consec_outage_fails >= 3:
+                    _cur_model_name = _fallback_model or "gemini-3.6-flash"
+                    _note_model_outage_fail(_cur_model_name)
+                    _next_model = _next_fallback_model(_cur_model_name)
+                    if _next_model != _cur_model_name:
+                        logger.warning(f"[Dagano] 3 consecutive timeouts on {_cur_model_name} — switching to {_next_model} immediately ({_cur_model_name} now in 5-min cooldown)")
+                        return await _dagano_gemini_raw_multi(imgs, prompt,
+                                                               _fallback_model=(None if _next_model == "gemini-3.6-flash" else _next_model))
                 continue
             except Exception as e:
                 msg = str(e)
@@ -17778,13 +17851,31 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str, _fallback_model: str
                     if _fallback_model is None:
                         key_rotator.mark_rate_limited(key, daily_exhausted=daily, retry_after_seconds=retry_s)
                     logger.warning(f"[Dagano] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key | raw_error={full_msg[:1500]}")
+                    _consec_outage_fails = 0
                     continue
                 if _is_auth_ban_error(full_msg):
                     key_rotator.mark_banned(key, reason=full_msg[:200])
                     key_rotator.record_account_error(key)
                     _dead_accounts.add(key_rotator.account_of(key))
                     logger.warning(f"[Dagano] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
+                    _consec_outage_fails = 0
                     continue
+                _is_outage_err = ("UNAVAILABLE" in msg or "503" in msg or "504" in msg
+                                  or "DEADLINE_EXCEEDED" in msg or "overloaded" in msg.lower()
+                                  or "404" in msg or "NOT_FOUND" in msg.upper()
+                                  or "limit: 0" in full_msg or "'limit': 0" in full_msg)
+                if _is_outage_err:
+                    _consec_outage_fails += 1
+                    if _consec_outage_fails >= 3:
+                        _cur_model_name = _fallback_model or "gemini-3.6-flash"
+                        _note_model_outage_fail(_cur_model_name)
+                        _next_model = _next_fallback_model(_cur_model_name)
+                        if _next_model != _cur_model_name:
+                            logger.warning(f"[Dagano] 3 consecutive backend-outage failures on {_cur_model_name} — switching to {_next_model} immediately ({_cur_model_name} now in 5-min cooldown)")
+                            return await _dagano_gemini_raw_multi(imgs, prompt,
+                                                                   _fallback_model=(None if _next_model == "gemini-3.6-flash" else _next_model))
+                else:
+                    _consec_outage_fails = 0
                 logger.warning(f"[Dagano] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
         if _fallback_model is None:
@@ -28739,9 +28830,22 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
     either way)."""
     _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Gemini")
     try:
-        from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today, _qbm_page_used_accounts_ctx
+        from pdf_handler import (key_rotator, image_to_base64, _is_gemini_key_exhausted_today, _qbm_page_used_accounts_ctx,
+                                  _model_in_cooldown, _note_model_outage_fail,
+                                  _note_model_success, _next_fallback_model, _first_available_model)
         if not key_rotator.keys:
             return "" if gemini_only else (await _gen_groq_raw_text(imgs[0], prompt) if imgs else "")
+        # 2026-11-18: 5-min circuit breaker -- skip straight to a model
+        # that isn't already in cooldown from an earlier call's 3-in-a-row
+        # backend outage, instead of re-proving the same overload here.
+        _this_model = _fallback_model if _fallback_model is not None else "gemini-3.6-flash"
+        if _model_in_cooldown(_this_model):
+            _skip_to = _first_available_model()
+            if _skip_to != _this_model:
+                logger.warning(f"[QBM] {_this_model} is in 5-min cooldown (multi-image, recent backend overload) — skipping straight to {_skip_to}")
+                return await _qbm_gemini_raw_multi(imgs, prompt, gemini_only=gemini_only,
+                                                    _fallback_model=(None if _skip_to == "gemini-3.6-flash" else _skip_to))
+        _consec_outage_fails = 0
         _all_marked_exhausted = _fallback_model is None and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys)
         if _all_marked_exhausted:
             # Don't blind-trust the in-memory/D1 exhaustion flag -- if it was
@@ -28822,10 +28926,13 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
                 async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(
                         asyncio.to_thread(_call, key, _fallback_model or "gemini-3.6-flash"),
-                        timeout=35  # 2026-11-18: lowered from 40 -- see
-                        # _qbm_gemini_raw for rationale.
+                        timeout=45  # 2026-11-18: multi-image calls carry
+                        # several pages/images per request, so they get
+                        # more headroom (45s) than the single-image path.
                     )
                 key_rotator.mark_healthy(key)
+                _note_model_success(_fallback_model or "gemini-3.6-flash")
+                _consec_outage_fails = 0
                 _used_set_multi = _qbm_page_used_accounts_ctx.get()
                 if _used_set_multi is not None:
                     _used_set_multi.add(key_rotator.account_of(key))
@@ -28844,7 +28951,16 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
                         logger.warning(f"[QBM-diag] failed to introspect empty multi-image response: {_diag_err}")
                 return _rtext_multi
             except asyncio.TimeoutError:
-                logger.warning(f"[QBM] Gemini key {key[:12]}... multi-image call timed out (60s), trying next key")
+                logger.warning(f"[QBM] Gemini key {key[:12]}... multi-image call timed out (45s), trying next key")
+                _consec_outage_fails += 1
+                if _consec_outage_fails >= 3:
+                    _cur_model_name = _fallback_model or "gemini-3.6-flash"
+                    _note_model_outage_fail(_cur_model_name)
+                    _next_model = _next_fallback_model(_cur_model_name)
+                    if _next_model != _cur_model_name:
+                        logger.warning(f"[QBM] 3 consecutive timeouts on {_cur_model_name} (multi-image) — switching to {_next_model} immediately ({_cur_model_name} now in 5-min cooldown)")
+                        return await _qbm_gemini_raw_multi(imgs, prompt, gemini_only=gemini_only,
+                                                            _fallback_model=(None if _next_model == "gemini-3.6-flash" else _next_model))
                 continue
             except Exception as e:
                 msg = str(e)
@@ -28870,15 +28986,33 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
                     if _fallback_model is None:
                         key_rotator.mark_rate_limited(key, daily_exhausted=daily, retry_after_seconds=retry_s)
                     logger.warning(f"[QBM] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key | raw_error={full_msg[:1500]}")
+                    _consec_outage_fails = 0
                     continue
                 if _is_auth_ban_error(full_msg):
                     key_rotator.mark_banned(key, reason=full_msg[:200])
                     key_rotator.record_account_error(key)
                     _dead_accounts.add(key_rotator.account_of(key))
                     logger.warning(f"[QBM] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
+                    _consec_outage_fails = 0
                     continue
                 if "response.text" in msg or "finish_reason" in msg.lower() or "Invalid operation" in msg or "quick accessor" in msg:
                     logger.warning(f"[QBM-diag] Gemini key {key[:12]}... (multi-image) response.text accessor FAILED (likely SAFETY/RECITATION/MAX_TOKENS block, not quota): {full_msg[:800]}")
+                _is_outage_err = ("UNAVAILABLE" in msg or "503" in msg or "504" in msg
+                                  or "DEADLINE_EXCEEDED" in msg or "overloaded" in msg.lower()
+                                  or "404" in msg or "NOT_FOUND" in msg.upper()
+                                  or "limit: 0" in full_msg or "'limit': 0" in full_msg)
+                if _is_outage_err:
+                    _consec_outage_fails += 1
+                    if _consec_outage_fails >= 3:
+                        _cur_model_name = _fallback_model or "gemini-3.6-flash"
+                        _note_model_outage_fail(_cur_model_name)
+                        _next_model = _next_fallback_model(_cur_model_name)
+                        if _next_model != _cur_model_name:
+                            logger.warning(f"[QBM] 3 consecutive backend-outage failures on {_cur_model_name} (multi-image) — switching to {_next_model} immediately ({_cur_model_name} now in 5-min cooldown)")
+                            return await _qbm_gemini_raw_multi(imgs, prompt, gemini_only=gemini_only,
+                                                                _fallback_model=(None if _next_model == "gemini-3.6-flash" else _next_model))
+                else:
+                    _consec_outage_fails = 0
                 logger.warning(f"[QBM] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
         if _fallback_model is None:
@@ -28913,9 +29047,22 @@ async def _ai_gemini_text_call(prompt: str, gemini_only: bool = False, _fallback
     against gemini-3.5-flash-lite -- a separate free-tier quota bucket
     from gemini-3.6-flash (still Gemini, Groq behavior unchanged)."""
     try:
-        from pdf_handler import key_rotator, _is_gemini_key_exhausted_today
+        from pdf_handler import (key_rotator, _is_gemini_key_exhausted_today,
+                                  _model_in_cooldown, _note_model_outage_fail,
+                                  _note_model_success, _next_fallback_model, _first_available_model)
         if not key_rotator.keys:
             return ""
+        # 2026-11-18: 5-min circuit breaker -- skip straight to a model
+        # that isn't already in cooldown from an earlier call's 3-in-a-row
+        # backend outage, instead of re-proving the same overload here.
+        _this_model = _fallback_model if _fallback_model is not None else "gemini-3.6-flash"
+        if _model_in_cooldown(_this_model):
+            _skip_to = _first_available_model()
+            if _skip_to != _this_model:
+                logger.warning(f"[AI] {_this_model} is in 5-min cooldown (recent backend overload) — skipping straight to {_skip_to}")
+                return await _ai_gemini_text_call(prompt, gemini_only=gemini_only,
+                                                   _fallback_model=(None if _skip_to == "gemini-3.6-flash" else _skip_to))
+        _consec_outage_fails = 0
         from google import genai as gai
         from google.genai import types
 
@@ -28960,7 +29107,21 @@ async def _ai_gemini_text_call(prompt: str, gemini_only: bool = False, _fallback
                         timeout=150
                     )
                 key_rotator.mark_healthy(key)
+                _note_model_success(_fallback_model or "gemini-3.6-flash")
+                _consec_outage_fails = 0
                 return response.text or ""
+            except asyncio.TimeoutError:
+                logger.warning(f"[AI] Gemini key {key[:12]}... timed out, trying next key")
+                _consec_outage_fails += 1
+                if _consec_outage_fails >= 3:
+                    _cur_model_name = _fallback_model or "gemini-3.6-flash"
+                    _note_model_outage_fail(_cur_model_name)
+                    _next_model = _next_fallback_model(_cur_model_name)
+                    if _next_model != _cur_model_name:
+                        logger.warning(f"[AI] 3 consecutive timeouts on {_cur_model_name} — switching to {_next_model} immediately ({_cur_model_name} now in 5-min cooldown)")
+                        return await _ai_gemini_text_call(prompt, gemini_only=gemini_only,
+                                                           _fallback_model=(None if _next_model == "gemini-3.6-flash" else _next_model))
+                continue
             except Exception as e:
                 msg = str(e)
                 if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
@@ -28970,13 +29131,31 @@ async def _ai_gemini_text_call(prompt: str, gemini_only: bool = False, _fallback
                     if _fallback_model is None:
                         key_rotator.mark_rate_limited(key, daily_exhausted=daily)
                     logger.warning(f"[AI] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key")
+                    _consec_outage_fails = 0
                     continue
                 if _is_auth_ban_error(msg):
                     key_rotator.mark_banned(key, reason=msg[:200])
                     key_rotator.record_account_error(key)
                     _dead_accounts.add(key_rotator.account_of(key))
                     logger.warning(f"[AI] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
+                    _consec_outage_fails = 0
                     continue
+                _is_outage_err = ("UNAVAILABLE" in msg or "503" in msg or "504" in msg
+                                  or "DEADLINE_EXCEEDED" in msg or "overloaded" in msg.lower()
+                                  or "404" in msg or "NOT_FOUND" in msg.upper()
+                                  or "limit: 0" in msg or "'limit': 0" in msg)
+                if _is_outage_err:
+                    _consec_outage_fails += 1
+                    if _consec_outage_fails >= 3:
+                        _cur_model_name = _fallback_model or "gemini-3.6-flash"
+                        _note_model_outage_fail(_cur_model_name)
+                        _next_model = _next_fallback_model(_cur_model_name)
+                        if _next_model != _cur_model_name:
+                            logger.warning(f"[AI] 3 consecutive backend-outage failures on {_cur_model_name} — switching to {_next_model} immediately ({_cur_model_name} now in 5-min cooldown)")
+                            return await _ai_gemini_text_call(prompt, gemini_only=gemini_only,
+                                                               _fallback_model=(None if _next_model == "gemini-3.6-flash" else _next_model))
+                else:
+                    _consec_outage_fails = 0
                 logger.warning(f"[AI] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
         if _fallback_model is None:

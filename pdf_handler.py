@@ -1617,27 +1617,37 @@ def _note_model_success(model_name: str):
     _gemini_model_cooldown_until.pop(model_name, None)
 
 
-def _next_fallback_model(current: str) -> str | None:
+def _earliest_cooldown_model(candidates: list) -> str:
+    """All candidates are in cooldown -- return the one whose cooldown
+    expires soonest (least-bad choice) instead of giving up with None."""
+    return min(candidates, key=lambda m: _gemini_model_cooldown_until.get(m, 0))
+
+
+def _next_fallback_model(current: str) -> str:
     """Returns the next model in GEMINI_FALLBACK_MODELS after `current`,
-    skipping any model currently in cooldown, or None if none remain.
+    skipping any model currently in cooldown. If every remaining model is
+    in cooldown, returns the one whose cooldown lifts soonest instead of
+    None, so callers always get a usable model to try.
     `current=None` means 'before the first model' (i.e. the primary)."""
     try:
         start_idx = 0 if current is None else GEMINI_FALLBACK_MODELS.index(current) + 1
     except ValueError:
         start_idx = 0
-    for m in GEMINI_FALLBACK_MODELS[start_idx:]:
+    remaining = GEMINI_FALLBACK_MODELS[start_idx:] or GEMINI_FALLBACK_MODELS
+    for m in remaining:
         if not _model_in_cooldown(m):
             return m
-    return None
+    return _earliest_cooldown_model(remaining)
 
 
 def _first_available_model() -> str:
     """Returns the first model in GEMINI_FALLBACK_MODELS not currently in
-    cooldown, or the primary model if all are (nothing better to do)."""
+    cooldown. If every model is in cooldown, returns the one whose
+    cooldown lifts soonest instead of just the primary blindly."""
     for m in GEMINI_FALLBACK_MODELS:
         if not _model_in_cooldown(m):
             return m
-    return GEMINI_FALLBACK_MODELS[0]
+    return _earliest_cooldown_model(GEMINI_FALLBACK_MODELS)
 
 
 async def _pdfs_gemini_call_with_retry(prompt: str, img: Image.Image, log_tag: str) -> str:
