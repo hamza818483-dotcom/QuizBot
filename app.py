@@ -29002,10 +29002,21 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 # doesn't burn 3 keys' worth of retries before moving on.
                 _is_model_unavailable_err = ("404" in msg or "NOT_FOUND" in msg.upper()
                                               or "limit: 0" in full_msg or "'limit': 0" in full_msg)
+                # 2026-11-18 FIX (user report: page 5 timed out, 429/503/504
+                # all over the log but model never switched): a blank
+                # str(e) -- seen from the SDK on some connection-level
+                # failures -- used to fall into the "else" branch below and
+                # RESET _consec_outage_fails to 0, so a blank-message error
+                # sandwiched between two real 503/504s wiped the streak
+                # right before it would have hit 3 and triggered the
+                # fast-switch. An unidentifiable/blank error on a Gemini
+                # call is never evidence the backend is HEALTHY, so it must
+                # count toward (not reset) the outage streak too.
                 _is_outage_err = ("UNAVAILABLE" in msg or "503" in msg or "504" in msg
                                   or "DEADLINE_EXCEEDED" in msg or "overloaded" in msg.lower()
                                   or isinstance(e, asyncio.TimeoutError)
-                                  or _is_model_unavailable_err)
+                                  or _is_model_unavailable_err
+                                  or not msg.strip())
                 if _is_outage_err:
                     _consec_outage_fails += 1
                     _last_outage_acct = key_rotator.account_of(key)
@@ -29285,10 +29296,14 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
                     continue
                 if "response.text" in msg or "finish_reason" in msg.lower() or "Invalid operation" in msg or "quick accessor" in msg:
                     logger.warning(f"[QBM-diag] Gemini key {key[:12]}... (multi-image) response.text accessor FAILED (likely SAFETY/RECITATION/MAX_TOKENS block, not quota): {full_msg[:800]}")
+                # 2026-11-18 FIX (same root cause as the single-image path
+                # above): a blank str(e) must count toward the outage
+                # streak instead of resetting it to 0.
                 _is_outage_err = ("UNAVAILABLE" in msg or "503" in msg or "504" in msg
                                   or "DEADLINE_EXCEEDED" in msg or "overloaded" in msg.lower()
                                   or "404" in msg or "NOT_FOUND" in msg.upper()
-                                  or "limit: 0" in full_msg or "'limit': 0" in full_msg)
+                                  or "limit: 0" in full_msg or "'limit': 0" in full_msg
+                                  or not msg.strip())
                 if _is_outage_err:
                     _consec_outage_fails += 1
                     if _consec_outage_fails >= 3:
