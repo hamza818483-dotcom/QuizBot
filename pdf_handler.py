@@ -2591,6 +2591,7 @@ async def generate_mcq_from_image(
     mcq_count: int = None,
     max_keys: int = None,
     custom_prompt: str = None,
+    is_img_mode: bool = False,  # also set True for plain /pdf -- see app.py caller
 ) -> list:
     global _gemini_backend_outage_until
     if custom_prompt:
@@ -2694,7 +2695,24 @@ async def generate_mcq_from_image(
     # (3.6-flash -> 3.5-flash-lite -> 3.5-flash -> 4-hydrogen) -- each is a
     # separate free-tier quota bucket (4-hydrogen a separate compute pool),
     # so this key tries all four models before the outer loop moves on.
-    _GEMINI_MODELS = list(GEMINI_FALLBACK_MODELS)
+    # 2026-11-18 (/img fix #1): order the 4-model fallback chain so a model
+    # already in the shared 5-min circuit-breaker cooldown is tried LAST
+    # instead of first -- previously /img always hit gemini-3.6-flash first
+    # even while it sat in cooldown from repeated 503/504s elsewhere, just
+    # to immediately re-fail the same way after burning ~35-45s.
+    if is_img_mode:
+        _GEMINI_MODELS = sorted(GEMINI_FALLBACK_MODELS, key=lambda m: _model_in_cooldown(m))
+    else:
+        _GEMINI_MODELS = list(GEMINI_FALLBACK_MODELS)
+
+    # 2026-11-18 (/img fix #3): /img's caller passes max_keys=None, which
+    # already sets max_retries = len(_ordered) (every live key) above --
+    # but guarantee a floor of 6 distinct accounts/keys here explicitly so
+    # a transient "0 valid MCQs parsed" or 503/504 on the first 1-2 keys
+    # can never look exhausted before at least 6 different keys (across
+    # all 4 fallback models each) have genuinely been tried.
+    if is_img_mode:
+        max_retries = max(max_retries, min(6, len(_ordered) or 6))
 
     _tried_keys = set()
     for attempt in range(max_retries):
@@ -2741,12 +2759,34 @@ async def generate_mcq_from_image(
                 # asyncio timeout, in ms) lets the real network call give
                 # up on its own so the retry loop can move to the next key
                 # promptly instead of stalling on a dead/slow connection.
-                _http_timeout_ms = 45000 if attempt == 0 else 28000
+                # 2026-11-18 (/img fix #2): /img gets a hard 35s timeout on
+                # every single attempt, regardless of attempt index -- the
+                # 45s-then-28s schedule below was letting /img's first call
+                # sit for a full 45s against an already-overloaded model
+                # before failing. Other callers (/pdf, /extra, /bio, /chem)
+                # keep the existing 45s/28s schedule unchanged.
+                _http_timeout_ms = 35000 if is_img_mode else (45000 if attempt == 0 else 28000)
                 client = gai.Client(
                     api_key=key,
                     http_options=types.HttpOptions(timeout=_http_timeout_ms)
                 )
                 img_b64 = image_to_base64(img)
+
+                # 2026-11-18 (/img fix #4): /img uses a right-sized 8192
+                # max_output_tokens (its compact single-image prompt never
+                # needs /rd's 32768 headroom) plus an explicit JSON
+                # response_mime_type, so the model can't drift into
+                # markdown-fenced or prose-wrapped output that gets cut
+                # mid-JSON. Every other caller keeps its existing
+                # max_output_tokens-only config unchanged.
+                _gen_config = (
+                    types.GenerateContentConfig(
+                        max_output_tokens=8192,
+                        response_mime_type="application/json",
+                    )
+                    if is_img_mode else
+                    types.GenerateContentConfig(max_output_tokens=_rd_output_token_cap())
+                )
 
                 def _call_gemini():
                     return client.models.generate_content(
@@ -2766,8 +2806,9 @@ async def generate_mcq_from_image(
                         # MAX_TOKENS truncation and /rd could never
                         # actually succeed on such a page. Only /rd gets
                         # the larger cap; every other mode keeps 16384
-                        # unchanged.
-                        config=types.GenerateContentConfig(max_output_tokens=_rd_output_token_cap())
+                        # unchanged. /img gets its own 8192+JSON config
+                        # above (_gen_config) instead.
+                        config=_gen_config
                     )
 
                 # 2026-08-29: 16384 token cap (right-sized for 20-25 MCQs)
@@ -2791,7 +2832,13 @@ async def generate_mcq_from_image(
                 # (max_keys=None) -- a slow/busy key eating the full
                 # timeout before falling to the next key is the actual
                 # per-page slowness risk, more than the token cap itself.
-                _attempt_timeout = (60 if attempt == 0 else 40) if _rd_output_token_cap() > 16384 else (50 if attempt == 0 else 32)
+                # 2026-11-18 (/img fix #2): /img's asyncio-level wait_for
+                # cap also hard-locked to 35s (matching the HTTP-level
+                # _http_timeout_ms above) -- previously this inherited the
+                # 50/32s schedule meant for /pdf/non-img pages, so a slow
+                # response could still stall past 35s even with the HTTP
+                # client's own timeout set lower.
+                _attempt_timeout = 35 if is_img_mode else ((60 if attempt == 0 else 40) if _rd_output_token_cap() > 16384 else (50 if attempt == 0 else 32))
                 async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=_attempt_timeout)
                 # 2026-08-28: detect a response that got cut off by the
@@ -2817,7 +2864,20 @@ async def generate_mcq_from_image(
                     except Exception:
                         pass
                     logger.warning(f"[Gemini] Page {page}: response OK but 0 valid MCQs parsed (attempt {attempt+1}, model={model_name}) — likely malformed/truncated JSON, not a real 'page has no content'")
+                    if is_img_mode:
+                        # 2026-11-18 (/img fix #3): previously this fell
+                        # through to `return valid` below, i.e. an empty
+                        # list was treated as a final (successful, just
+                        # empty) result -- the caller then logged "all
+                        # Gemini keys exhausted" after a SINGLE malformed-
+                        # JSON response instead of retrying. Treat it as a
+                        # technical failure like MAX_TOKENS truncation: try
+                        # the next model on this key, and if that's the
+                        # last model, fall through to the next key/account.
+                        last_exc = RuntimeError("0 valid MCQs parsed (malformed/truncated JSON)")
+                        continue
                 key_rotator.mark_healthy(key)
+                _note_model_success(model_name)
                 logger.info(f"[Gemini] Page {page}: {len(valid)} MCQs (attempt {attempt+1}, model={model_name})")
                 try:
                     _last_gemini_success_ctx.set({
@@ -2833,16 +2893,34 @@ async def generate_mcq_from_image(
             except Exception as e:
                 last_exc = e
                 err_str = str(e)
-                if "503" in err_str or "UNAVAILABLE" in err_str.upper():
+                if "503" in err_str or "UNAVAILABLE" in err_str.upper() or "504" in err_str or "DEADLINE_EXCEEDED" in err_str.upper():
                     try:
                         from app import classify_ai_error
                         classify_ai_error(e, "gemini")
                     except Exception:
                         pass
-                    logger.warning(f"[Gemini] {model_name} overloaded (503) on attempt {attempt+1} — trying next model on same key")
+                    if is_img_mode:
+                        # 2026-11-18 (/img fix #1): feed this 503/504 into
+                        # the shared circuit breaker so a model that keeps
+                        # overloading gets put in cooldown (and skipped
+                        # first on the NEXT /img call), instead of /img
+                        # silently re-discovering the same outage from
+                        # scratch on every single request.
+                        _note_model_outage_fail(model_name)
+                    logger.warning(f"[Gemini] {model_name} overloaded (503/504) on attempt {attempt+1} — trying next model on same key")
                     continue
-                # Not a 503 — no point trying the fallback model on this key,
-                # move straight to key-level handling below.
+                if is_img_mode and ("timeout" in err_str.lower() or "timed out" in err_str.lower()):
+                    # 2026-11-18 (/img fix #3): a bare timeout on /img is
+                    # the same class of transient infra failure as 503/504
+                    # -- try the next model on this key rather than
+                    # jumping straight to key-level handling (which would
+                    # otherwise burn this key's remaining model attempts).
+                    _note_model_outage_fail(model_name)
+                    logger.warning(f"[Gemini] {model_name} timeout on attempt {attempt+1} — trying next model on same key")
+                    continue
+                # Not a 503/504/timeout — no point trying the fallback
+                # model on this key, move straight to key-level handling
+                # below.
                 break
         e = last_exc
         if e is None:

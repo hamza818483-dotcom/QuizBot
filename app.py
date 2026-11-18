@@ -7348,7 +7348,7 @@ def _dedupe_mcqs(mcqs: list) -> list:
     """DISABLED: dedup inactivated to stop false-positive MCQ drops. No-op passthrough."""
     return list(mcqs or [])
 
-async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0, custom_prompt: str = None, gemini_only: bool = False):
+async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0, custom_prompt: str = None, gemini_only: bool = False, is_img_mode: bool = False):
     """
     Smart wrapper: Gemini first (primary), then Groq fallback (internal key rotation via pdf_handler).
     On failure → rotate through NVIDIA / OpenRouter Qwen VL / Nemotron / Gemma.
@@ -7371,7 +7371,7 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
     # each call already uses its own independent API key + Gemini/Groq request
     # and has nothing that actually needs global serialization. Multiple users'
     # jobs now run concurrently instead of queuing behind one another.
-    out, tried_groq_keys = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count, exclude_groq_keys=exclude_groq_keys, key_offset=key_offset, custom_prompt=custom_prompt, gemini_only=gemini_only)
+    out, tried_groq_keys = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count, exclude_groq_keys=exclude_groq_keys, key_offset=key_offset, custom_prompt=custom_prompt, gemini_only=gemini_only, is_img_mode=is_img_mode)
     # 2026-08-27: code-level SOURCE-GROUNDING enforcement for the default
     # /pdf path (was only wired to /chem before -- see _filter_verified_mcqs
     # docstring). The default prompt already asks Gemini/Groq for
@@ -7977,7 +7977,7 @@ def _cap_mcq_options(mcqs: list, max_opts: int = 4) -> list:
     return mcqs
 
 
-async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0, custom_prompt: str = None, gemini_only: bool = False):
+async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0, custom_prompt: str = None, gemini_only: bool = False, is_img_mode: bool = False):
     # 2026-08-19: Gemini is now PRIMARY for ALL modes (explicit user
     # preference), Groq is fallback only when Gemini fails/empty. Previously
     # (2026-08-07) Groq was made primary because Gemini's free-tier daily
@@ -8027,6 +8027,13 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
                     img, topic, page_num, mcq_count,
                     max_keys=_round_size,
                     custom_prompt=custom_prompt,
+                    # 2026-11-18: /pdf (plain_pdf mode) gets the same
+                    # cooldown-skip/35s-timeout/retry-floor/8192+JSON-config
+                    # fixes as /img -- both run this exact _plain_pdf
+                    # branch, and /pdf hit the identical "0 valid MCQs
+                    # parsed -> instant exhausted" + "cooldown model tried
+                    # first" bugs.
+                    is_img_mode=(is_img_mode or _plain_pdf),
                 )
             except Exception as e:
                 _LAST_GEMINI_ERROR["reason"] = f"{type(e).__name__}: {e}"
@@ -10419,7 +10426,7 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
             # encodes the target/count), so a single Gemini call is final:
             # no 3x retry loop re-running the whole provider chain trying
             # to hit an exact count (that loop was the main /img slowness).
-            _gen_task = _spawn_task(generate_mcq_from_image(img, topic, 1, None, custom_prompt=_build_img_compact_prompt(topic, mcq_count), gemini_only=True))
+            _gen_task = _spawn_task(generate_mcq_from_image(img, topic, 1, None, custom_prompt=_build_img_compact_prompt(topic, mcq_count), gemini_only=True, is_img_mode=True))
         ACTIVE_GEN_TASK[chat_id] = _gen_task
         try:
             mcqs = await _gen_task
