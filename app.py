@@ -28489,7 +28489,10 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(
                         asyncio.to_thread(_call, key, _fallback_model or "gemini-3.6-flash"),
-                        timeout=40
+                        timeout=35  # 2026-11-18: lowered from 40 -- with 4
+                        # fallback models now in the chain, a single slow
+                        # request must not eat the page's whole 120s budget
+                        # before other models get a chance.
                     )
                 key_rotator.mark_healthy(key)
                 _consec_outage_fails = 0  # reset -- a live key answered, so the
@@ -28594,9 +28597,20 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 # 97-key pool (2-3 min wasted) before finally falling back to
                 # Groq. 3 in a row (across different keys, so it's not just
                 # one flaky key) = treat as backend-wide outage, stop early.
+                # 2026-11-18 (gemini suggestion): a 404 ("model not found" /
+                # not enabled for this key/tier) or "limit: 0" response means
+                # THIS MODEL isn't available on this key -- never a reason to
+                # ban the key (it may work fine on another model), but still
+                # worth counting toward the fast model-switch below so a key
+                # pool that uniformly lacks access to a newer model (e.g.
+                # gemini-4-hydrogen not yet enabled on older free-tier keys)
+                # doesn't burn 3 keys' worth of retries before moving on.
+                _is_model_unavailable_err = ("404" in msg or "NOT_FOUND" in msg.upper()
+                                              or "limit: 0" in full_msg or "'limit': 0" in full_msg)
                 _is_outage_err = ("UNAVAILABLE" in msg or "503" in msg or "504" in msg
                                   or "DEADLINE_EXCEEDED" in msg or "overloaded" in msg.lower()
-                                  or isinstance(e, asyncio.TimeoutError))
+                                  or isinstance(e, asyncio.TimeoutError)
+                                  or _is_model_unavailable_err)
                 if _is_outage_err:
                     _consec_outage_fails += 1
                     _last_outage_acct = key_rotator.account_of(key)
@@ -28604,13 +28618,30 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                     _consec_outage_fails = 0
                     _last_outage_acct = None
                 logger.warning(f"[QBM] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
+                # 2026-11-18 (gemini suggestion): 503/504/timeout is a
+                # whole-model backend overload, not a per-key problem --
+                # waiting and retrying the SAME model wastes the page's
+                # 120s budget. Switch to the NEXT fallback model
+                # immediately instead of waiting, so all 4 models get a
+                # real shot within the timeout.
                 if _consec_outage_fails >= 3:
+                    _next_model = {
+                        None: "gemini-3.5-flash-lite",
+                        "gemini-3.5-flash-lite": "gemini-3.5-flash",
+                        "gemini-3.5-flash": "gemini-4-hydrogen",
+                    }.get(_fallback_model)
+                    if _next_model is not None:
+                        logger.warning(f"[QBM] 3 consecutive backend-outage failures on {_fallback_model or 'gemini-3.6-flash'} — switching to {_next_model} immediately (no wait)")
+                        return await _qbm_gemini_raw(img, prompt, careful=careful, gemini_only=gemini_only, _fallback_model=_next_model)
+                    # Already on the last fallback model (gemini-4-hydrogen)
+                    # -- no model left to switch to, so wait briefly and
+                    # retry with fresh keys as before (capped at 5 rounds).
                     _outage_wait_rounds += 1
                     if _outage_wait_rounds > 5:
-                        logger.error("[QBM] backend outage persisted through 5 wait+retry rounds — giving up for this page (Groq disabled per user request)")
+                        logger.error("[QBM] backend outage persisted through 5 wait+retry rounds on last fallback model — giving up for this page (Groq disabled per user request)")
                         break
                     _wait_s = min(10 * _outage_wait_rounds, 30)
-                    logger.error(f"[QBM] 3 consecutive backend-outage failures across different keys — Google Gemini seems overloaded. Waiting {_wait_s}s then retrying with fresh keys (round {_outage_wait_rounds}/5, Groq disabled per user request)")
+                    logger.error(f"[QBM] 3 consecutive backend-outage failures on last fallback model ({_fallback_model}) — waiting {_wait_s}s then retrying with fresh keys (round {_outage_wait_rounds}/5, Groq disabled per user request)")
                     try:
                         _chat_id_for_notice = _current_job_chat_id_ctx.get()
                         _notice_text = (
@@ -28770,7 +28801,8 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
                 async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(
                         asyncio.to_thread(_call, key, _fallback_model or "gemini-3.6-flash"),
-                        timeout=40
+                        timeout=35  # 2026-11-18: lowered from 40 -- see
+                        # _qbm_gemini_raw for rationale.
                     )
                 key_rotator.mark_healthy(key)
                 _used_set_multi = _qbm_page_used_accounts_ctx.get()
