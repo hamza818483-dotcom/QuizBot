@@ -1574,6 +1574,71 @@ GEMINI_FALLBACK_MODELS = [
     "gemini-4-hydrogen",      # 4th choice (separate compute pool, newest)
 ]
 
+# 2026-11-18: process-wide 5-minute circuit breaker, shared by every
+# Gemini-call function across app.py and pdf_handler.py. When a MODEL
+# (not a key -- a whole backend overload hits every key on that model the
+# same way) takes 3 consecutive 503/504/timeout/404-unavailable failures
+# across different keys, it's put in cooldown for 5 minutes so the NEXT
+# page/call skips straight past it instead of re-discovering the same
+# overload one key at a time. Purely in-memory (per-process) -- cheap,
+# no D1 round-trip, and naturally resets on deploy/restart.
+_GEMINI_MODEL_COOLDOWN_SECONDS = 300
+_gemini_model_cooldown_until: dict = {}  # {model_name: unix_ts}
+_gemini_model_consec_outage: dict = {}   # {model_name: consecutive fail count}
+
+
+def _model_in_cooldown(model_name: str) -> bool:
+    """True if this model was put in cooldown by 3+ consecutive
+    503/504/timeout/404 failures and the cooldown window hasn't elapsed."""
+    import time as _t
+    until = _gemini_model_cooldown_until.get(model_name)
+    return until is not None and _t.time() < until
+
+
+def _note_model_outage_fail(model_name: str) -> bool:
+    """Call once per 503/504/timeout/404-unavailable failure on this
+    model. Returns True the moment this call pushes it into cooldown
+    (3rd consecutive fail) so the caller can log it once, not every time."""
+    import time as _t
+    n = _gemini_model_consec_outage.get(model_name, 0) + 1
+    _gemini_model_consec_outage[model_name] = n
+    if n >= 3:
+        _gemini_model_cooldown_until[model_name] = _t.time() + _GEMINI_MODEL_COOLDOWN_SECONDS
+        _gemini_model_consec_outage[model_name] = 0  # reset counter for next time
+        return True
+    return False
+
+
+def _note_model_success(model_name: str):
+    """Call on any successful response from this model -- clears its
+    outage streak (a live response proves the backend isn't down) and
+    lifts an active cooldown early."""
+    _gemini_model_consec_outage[model_name] = 0
+    _gemini_model_cooldown_until.pop(model_name, None)
+
+
+def _next_fallback_model(current: str) -> str | None:
+    """Returns the next model in GEMINI_FALLBACK_MODELS after `current`,
+    skipping any model currently in cooldown, or None if none remain.
+    `current=None` means 'before the first model' (i.e. the primary)."""
+    try:
+        start_idx = 0 if current is None else GEMINI_FALLBACK_MODELS.index(current) + 1
+    except ValueError:
+        start_idx = 0
+    for m in GEMINI_FALLBACK_MODELS[start_idx:]:
+        if not _model_in_cooldown(m):
+            return m
+    return None
+
+
+def _first_available_model() -> str:
+    """Returns the first model in GEMINI_FALLBACK_MODELS not currently in
+    cooldown, or the primary model if all are (nothing better to do)."""
+    for m in GEMINI_FALLBACK_MODELS:
+        if not _model_in_cooldown(m):
+            return m
+    return GEMINI_FALLBACK_MODELS[0]
+
 
 async def _pdfs_gemini_call_with_retry(prompt: str, img: Image.Image, log_tag: str) -> str:
     """Shared Gemini-call-with-key-rotation-retry logic used by both /pdfs

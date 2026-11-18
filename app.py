@@ -28335,9 +28335,24 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
     if careful:
         prompt = (prompt or "") + _QBM_CAREFUL_SCAN_ADDENDUM
     try:
-        from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today, _qbm_page_used_accounts_ctx
+        from pdf_handler import (key_rotator, image_to_base64, _is_gemini_key_exhausted_today,
+                                  _qbm_page_used_accounts_ctx, _model_in_cooldown, _note_model_outage_fail,
+                                  _note_model_success, _next_fallback_model, _first_available_model)
         if not key_rotator.keys:
             return "" if gemini_only else await _gen_groq_raw_text(img, prompt)
+        # 2026-11-18: 5-min circuit breaker -- this page's call may start on
+        # _fallback_model=None (meaning "primary"), but if the primary (or
+        # whichever model this recursion step would use) is already in
+        # cooldown from an earlier page's 3-in-a-row outage, skip straight
+        # to the first model that ISN'T in cooldown instead of re-proving
+        # the same overload one key at a time.
+        _this_model = _fallback_model if _fallback_model is not None else "gemini-3.6-flash"
+        if _model_in_cooldown(_this_model):
+            _skip_to = _first_available_model()
+            if _skip_to != _this_model:
+                logger.warning(f"[QBM] {_this_model} is in 5-min cooldown (recent backend overload) — skipping straight to {_skip_to}")
+                return await _qbm_gemini_raw(img, prompt, careful=careful, gemini_only=gemini_only,
+                                              _fallback_model=(None if _skip_to == "gemini-3.6-flash" else _skip_to))
         # BUGFIX 2026-11-02: _dead_accounts was referenced (line ~27351,
         # ~27434 below) but never initialized in this function -- every
         # single Gemini call in /qbm hit "name '_dead_accounts' is not
@@ -28495,6 +28510,7 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                         # before other models get a chance.
                     )
                 key_rotator.mark_healthy(key)
+                _note_model_success(_fallback_model or "gemini-3.6-flash")
                 _consec_outage_fails = 0  # reset -- a live key answered, so the
                 # backend isn't globally down anymore
                 _last_outage_acct = None
@@ -28625,17 +28641,22 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 # immediately instead of waiting, so all 4 models get a
                 # real shot within the timeout.
                 if _consec_outage_fails >= 3:
-                    _next_model = {
-                        None: "gemini-3.5-flash-lite",
-                        "gemini-3.5-flash-lite": "gemini-3.5-flash",
-                        "gemini-3.5-flash": "gemini-4-hydrogen",
-                    }.get(_fallback_model)
+                    _cur_model_name = _fallback_model or "gemini-3.6-flash"
+                    # 2026-11-18: mark this model's 5-min cooldown in the
+                    # shared, process-wide breaker (not just this call's
+                    # local counter) so the NEXT page/call skips it too,
+                    # instead of re-discovering the same overload from
+                    # scratch one key at a time.
+                    _note_model_outage_fail(_cur_model_name)
+                    _next_model = _next_fallback_model(_cur_model_name)
                     if _next_model is not None:
-                        logger.warning(f"[QBM] 3 consecutive backend-outage failures on {_fallback_model or 'gemini-3.6-flash'} — switching to {_next_model} immediately (no wait)")
-                        return await _qbm_gemini_raw(img, prompt, careful=careful, gemini_only=gemini_only, _fallback_model=_next_model)
-                    # Already on the last fallback model (gemini-4-hydrogen)
-                    # -- no model left to switch to, so wait briefly and
-                    # retry with fresh keys as before (capped at 5 rounds).
+                        logger.warning(f"[QBM] 3 consecutive backend-outage failures on {_cur_model_name} — switching to {_next_model} immediately (no wait, {_cur_model_name} now in 5-min cooldown)")
+                        return await _qbm_gemini_raw(img, prompt, careful=careful, gemini_only=gemini_only,
+                                                      _fallback_model=(None if _next_model == "gemini-3.6-flash" else _next_model))
+                    # Every model (incl. fallbacks) is now either tried or
+                    # in cooldown -- no model left to switch to, so wait
+                    # briefly and retry with fresh keys as before (capped
+                    # at 5 rounds).
                     _outage_wait_rounds += 1
                     if _outage_wait_rounds > 5:
                         logger.error("[QBM] backend outage persisted through 5 wait+retry rounds on last fallback model — giving up for this page (Groq disabled per user request)")
