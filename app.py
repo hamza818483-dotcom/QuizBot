@@ -12708,9 +12708,15 @@ async def _handle_cut_pdf_command_inner(msg: dict):
     file_name = reply["document"].get("file_name", "file.pdf")
     file_size = reply["document"].get("file_size", 0)
     size_kb = round(file_size / 1024, 1) if file_size else "?"
+    target_label = f"Page {start_page}-{end_page}" if is_range else f"Page {single_page}"
 
-    status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB")
+    status_r = await send_msg(chat_id,
+        f"⏳ PDF download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n🎯 Target: {target_label}")
     status_msg_id = status_r.get("result", {}).get("message_id")
+    if status_msg_id:
+        await edit_msg(chat_id, status_msg_id,
+            f"⏳ PDF download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n🎯 Target: {target_label}",
+            reply_markup=_dlcancel_kb(chat_id, status_msg_id))
     # 2026-10-29: diagnostic only -- log RSS/VMS at the start of every /cut
     # so a later MemoryError's RSS/VMS numbers can be compared against this
     # baseline to confirm/rule out cross-request leftover virtual memory
@@ -12745,7 +12751,7 @@ async def _handle_cut_pdf_command_inner(msg: dict):
             filled = pct // 10
             return "█" * filled + "░" * (10 - filled)
 
-        async def _progress(current, total):
+        async def _progress_inner(current, total):
             if not total:
                 return
             pct = int(current * 100 / total)
@@ -12753,9 +12759,15 @@ async def _handle_cut_pdf_command_inner(msg: dict):
                 _last_pct["v"] = pct
                 try:
                     await edit_msg(chat_id, status_msg_id,
-                                    f"⏳ PDF download হচ্ছে...\n[{_bar(pct)} {pct}%]")
+                                    f"⏳ PDF download হচ্ছে...\n📄 {file_name}\n🎯 Target: {target_label}\n[{_bar(pct)} {pct}%]",
+                                    reply_markup=_dlcancel_kb(chat_id, status_msg_id))
                 except Exception:
                     pass
+
+        # Cancel-aware wrapper -- without this, pressing the Cancel button
+        # only deleted the status message while the actual file transfer
+        # kept running (same bug class already fixed for /qbm, /pdf, etc).
+        _progress = _wrap_dl_progress_cb(chat_id, status_msg_id, _progress_inner) if status_msg_id else _progress_inner
 
         try:
             if use_disk:
@@ -12779,6 +12791,14 @@ async def _handle_cut_pdf_command_inner(msg: dict):
                     _cut_pdf_cache.pop(next(iter(_cut_pdf_cache)))
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id, "✅ Download সম্পূর্ণ!\n⏳ Cut হচ্ছে...")
+        except _DownloadCancelled:
+            # dlcancel_ callback already deleted the status message.
+            if disk_src_path:
+                try:
+                    os.remove(disk_src_path)
+                except Exception:
+                    pass
+            return
         except Exception as e:
             logger.error(f"[Cut] download error: {e}", exc_info=True)
             if status_msg_id:
@@ -12934,11 +12954,17 @@ async def _handle_cut_csv_command_inner(msg: dict):
     file_size = reply["document"].get("file_size", 0)
     size_kb = round(file_size / 1024, 1) if file_size else "?"
 
-    status_r = await send_msg(chat_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n[░░░░░░░░░░ 0%]")
+    target_label = f"Row {start_no}-{end_no}"
+    status_r = await send_msg(chat_id,
+        f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n🎯 Target: {target_label}\n[░░░░░░░░░░ 0%]")
     status_msg_id = status_r.get("result", {}).get("message_id")
+    if status_msg_id:
+        await edit_msg(chat_id, status_msg_id,
+            f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n🎯 Target: {target_label}\n[░░░░░░░░░░ 0%]",
+            reply_markup=_dlcancel_kb(chat_id, status_msg_id))
 
     _last_pct_cut = {"v": -1}
-    def _dl_progress_cut(done, total):
+    def _dl_progress_cut_inner(done, total):
         if not status_msg_id or not total:
             return
         pct = int(done * 100 / total)
@@ -12946,7 +12972,13 @@ async def _handle_cut_csv_command_inner(msg: dict):
             return
         _last_pct_cut["v"] = pct
         bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
-        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n[{bar} {pct}%]"))
+        _spawn_task(edit_msg(chat_id, status_msg_id,
+            f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n🎯 Target: {target_label}\n[{bar} {pct}%]",
+            reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
+
+    # Cancel-aware wrapper -- same fix as /cut PDF: without this the Cancel
+    # button only deleted the status message while the download kept running.
+    _dl_progress_cut = _wrap_dl_progress_cb(chat_id, status_msg_id, _dl_progress_cut_inner) if status_msg_id else _dl_progress_cut_inner
 
     try:
         csv_bytes = await download_tg_file(file_id, progress_cb=_dl_progress_cut,
@@ -12954,6 +12986,9 @@ async def _handle_cut_csv_command_inner(msg: dict):
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id, "✅ Download সম্পূর্ণ!\n[██████████ 100%]\n⏳ CSV parse হচ্ছে...")
         mcqs = _parse_csv_bytes(csv_bytes)
+    except _DownloadCancelled:
+        # dlcancel_ callback already deleted the status message.
+        return
     except Exception as e:
         logger.error(f"[Cut] error: {e}", exc_info=True)
         if status_msg_id:
