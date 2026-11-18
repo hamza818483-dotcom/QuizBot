@@ -1790,16 +1790,52 @@ async def download_large_file_pyrogram(chat_id: int, message_id: int, progress_c
                 return None
             return data
 
-        _progress_fn = None
+        # BUG FIX (2026-11-18): pyrogram's OWN get_file() generator
+        # (which download_media() drives under the hood) wraps the whole
+        # chunk loop in "except Exception as e: log.exception(e)" and does
+        # NOT re-raise -- only pyrogram.StopTransmission is explicitly
+        # re-raised. So raising our _DownloadCancelled from inside the
+        # progress callback got silently swallowed by pyrogram itself: it
+        # just logged a traceback and ended the generator as if the
+        # transfer had simply stopped, returning a truncated/incomplete
+        # file -- which then looked like an ordinary download failure and
+        # triggered the normal fallback path, so the "cancelled" download
+        # actually RESTARTED from scratch instead of stopping. Raising
+        # pyrogram.StopTransmission instead (the one exception pyrogram's
+        # own code is guaranteed to propagate) and converting it back to
+        # _DownloadCancelled right after the download_media() call below
+        # keeps every existing _is_dl_cancel() check downstream working
+        # unchanged.
+        import pyrogram as _pyro_mod
+
+        # Two SEPARATE progress wrappers -- _pyro_parallel_download uses
+        # raw session.invoke() directly (not pyrogram's get_file()), so it
+        # correctly propagates our own _DownloadCancelled and must keep
+        # getting that. download_media() drives pyrogram's get_file(),
+        # which swallows every exception except pyrogram.StopTransmission
+        # (see big comment above the class only -- kept short here), so
+        # ITS callback must raise StopTransmission instead.
+        _progress_fn_parallel = None
+        _progress_fn_media = None
         if progress_cb:
-            async def _progress_fn(current, total):
+            async def _progress_fn_parallel(current, total):
                 try:
                     res = progress_cb(current, total)
                     if asyncio.iscoroutine(res):
                         await res
                 except Exception as _pe:
                     if _is_dl_cancel(_pe):
-                        raise  # Cancel button -> abort the transfer
+                        raise
+                    pass
+
+            async def _progress_fn_media(current, total):
+                try:
+                    res = progress_cb(current, total)
+                    if asyncio.iscoroutine(res):
+                        await res
+                except Exception as _pe:
+                    if _is_dl_cancel(_pe):
+                        raise _pyro_mod.StopTransmission()  # the only exception get_file() actually re-raises
                     pass
 
         # Fast path: pipelined parallel GetFile (see _pyro_parallel_download).
@@ -1807,13 +1843,16 @@ async def download_large_file_pyrogram(chat_id: int, message_id: int, progress_c
         _media = msg.document or msg.video or msg.audio
         if expected_sz and expected_sz >= 3 * 1024 * 1024:
             try:
-                return await _pyro_parallel_download(client, _media, expected_sz, progress_cb=_progress_fn)
+                return await _pyro_parallel_download(client, _media, expected_sz, progress_cb=_progress_fn_parallel)
             except Exception as _pde:
                 if _is_dl_cancel(_pde):
                     raise
                 logger.warning(f"[pyrogram] parallel download failed ({type(_pde).__name__}: {_pde}), falling back to sequential download_media")
 
-        file_bytes = await client.download_media(msg, in_memory=True, progress=_progress_fn)
+        try:
+            file_bytes = await client.download_media(msg, in_memory=True, progress=_progress_fn_media)
+        except _pyro_mod.StopTransmission:
+            raise _DownloadCancelled()
         if file_bytes is None:
             return None
         data = file_bytes.getvalue() if hasattr(file_bytes, "getvalue") else file_bytes
@@ -1871,6 +1910,20 @@ async def download_large_file_to_disk(chat_id: int, message_id: int, dest_path: 
         if not msg or not (msg.document or msg.video or msg.audio):
             return None
 
+        # BUG FIX (2026-11-18): download_media() drives pyrogram's own
+        # get_file() generator, which wraps its whole chunk loop in
+        # "except Exception: log.exception(e)" and does NOT re-raise --
+        # only pyrogram.StopTransmission is. Raising our _DownloadCancelled
+        # here got silently swallowed inside pyrogram itself (just logged,
+        # generator ends as if the transfer merely stopped), returning a
+        # truncated file that looked like an ordinary incomplete-download
+        # failure -- which triggered the normal fallback-to-in-memory path,
+        # so a cancelled download actually RESTARTED instead of stopping
+        # (exactly what the 2026-11-18 bug report showed). Raising
+        # pyrogram.StopTransmission instead and converting it back right
+        # after the call keeps every _is_dl_cancel() check downstream
+        # working unchanged.
+        import pyrogram as _pyro_mod
         _progress_fn = None
         if progress_cb:
             async def _progress_fn(current, total):
@@ -1880,10 +1933,13 @@ async def download_large_file_to_disk(chat_id: int, message_id: int, dest_path: 
                         await res
                 except Exception as _pe:
                     if _is_dl_cancel(_pe):
-                        raise
+                        raise _pyro_mod.StopTransmission()
                     pass
 
-        result = await client.download_media(msg, file_name=dest_path, progress=_progress_fn)
+        try:
+            result = await client.download_media(msg, file_name=dest_path, progress=_progress_fn)
+        except _pyro_mod.StopTransmission:
+            raise _DownloadCancelled()
         if not result or not os.path.exists(result):
             return None
         expected = getattr(msg.document, "file_size", None) or getattr(msg.video, "file_size", None) \
