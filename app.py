@@ -7426,8 +7426,25 @@ def _rd_dedupe_gapfill_merge(existing: list, new_mcqs: list) -> list:
 
 
 def _dedupe_mcqs(mcqs: list) -> list:
-    """DISABLED: dedup inactivated to stop false-positive MCQ drops. No-op passthrough."""
-    return list(mcqs or [])
+    """EXACT-duplicate-only dedup (2026-11-18): drops an MCQ only when both
+    its question text AND its full option set are identical (case/whitespace
+    -insensitive) to one already kept. No near-duplicate/overlap heuristic --
+    that's what caused the false-positive drops that got the old version
+    disabled. A question repeated with different options, or options
+    repeated under a different question, is NOT considered a duplicate."""
+    def _norm(s):
+        return re.sub(r'\s+', ' ', (s or "").strip().lower())
+    seen = set()
+    out = []
+    for m in (mcqs or []):
+        q = _norm(m.get("question", ""))
+        opts = tuple(sorted(_norm(o) for o in (m.get("options") or [])))
+        key = (q, opts)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(m)
+    return out
 
 async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0, custom_prompt: str = None, gemini_only: bool = False, is_img_mode: bool = False):
     """
