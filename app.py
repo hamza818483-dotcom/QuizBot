@@ -28420,6 +28420,10 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
         _outage_wait_rounds = 0
         _outage_notify_msg_id = None  # single message, edited each round
         _outage_notify_chat_id = None
+        _last_outage_acct = None  # account of the key that JUST failed with a
+        # 503/504/timeout -- skipped for the very next pick (one key only) so
+        # back-to-back outage retries don't land on the same account twice in
+        # a row (user report 2026-11-18: same few accounts kept repeating).
         while True:
             if not _queue:
                 if _refills >= 4:
@@ -28441,6 +28445,14 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 await asyncio.sleep(random.uniform(0.3, 0.9))
             key = _queue.pop(0)
             if key in _tried_keys:
+                continue
+            if _last_outage_acct is not None and key_rotator.account_of(key) == _last_outage_acct and any(
+                key_rotator.account_of(k) != _last_outage_acct for k in _queue
+            ):
+                # skip just this one pick if a different-account key is
+                # available right behind it in the queue -- push it to the
+                # back instead of dropping it, so it's still tried later.
+                _queue.append(key)
                 continue
             _tried_keys.add(key)
             _ki += 1
@@ -28464,6 +28476,7 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 key_rotator.mark_healthy(key)
                 _consec_outage_fails = 0  # reset -- a live key answered, so the
                 # backend isn't globally down anymore
+                _last_outage_acct = None
                 _used_acct = key_rotator.account_of(key)
                 _used_set = _qbm_page_used_accounts_ctx.get()
                 if _used_set is not None:
@@ -28568,8 +28581,10 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                                   or isinstance(e, asyncio.TimeoutError))
                 if _is_outage_err:
                     _consec_outage_fails += 1
+                    _last_outage_acct = key_rotator.account_of(key)
                 else:
                     _consec_outage_fails = 0
+                    _last_outage_acct = None
                 logger.warning(f"[QBM] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 if _consec_outage_fails >= 3:
                     _outage_wait_rounds += 1

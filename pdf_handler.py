@@ -997,11 +997,35 @@ class GeminiKeyRotator:
                 rebuilt.extend(group)
             healthy = rebuilt
             if healthiest_first:
-                # /unmesh: strict healthiest-first -- keys are already all
-                # under-rpm/not-cooling/not-exhausted/under-cap here; among
-                # them, pick the least-used key (rolling 24h) FIRST across
-                # the whole pool (stable sort keeps the random tie order).
-                healthy = sorted(healthy, key=lambda k: self.key_daily_call_count(k))
+                # /unmesh + /qbm outage-retry: least-used key first, but
+                # ACROSS ACCOUNTS (round-robin), not a flat sort -- a flat
+                # sort by usage count put every key of the 2-3 least-used
+                # accounts back-to-back at the front, so outage-retry loops
+                # (which pop sequentially) kept hammering the same couple of
+                # accounts instead of spreading across all healthy ones
+                # (user report 2026-11-18). Round-robin: one key per account
+                # per pass, each pass taking that account's next-least-used
+                # key, so consecutive picks always land on different accounts
+                # while still favoring least-used keys overall.
+                _acct_groups = {}
+                _acct_order = []
+                for k in healthy:
+                    a = self.account_of(k)
+                    if a not in _acct_groups:
+                        _acct_groups[a] = []
+                        _acct_order.append(a)
+                    _acct_groups[a].append(k)
+                for a in _acct_groups:
+                    _acct_groups[a].sort(key=lambda k: self.key_daily_call_count(k))
+                _acct_order.sort(key=lambda a: self.key_daily_call_count(_acct_groups[a][0]))
+                _rr = []
+                _i = 0
+                while any(_acct_groups[a][_i:_i+1] for a in _acct_order):
+                    for a in _acct_order:
+                        if len(_acct_groups[a]) > _i:
+                            _rr.append(_acct_groups[a][_i])
+                    _i += 1
+                healthy = _rr
             self.current = (self.current + 1) % max(len(self.keys), 1)
         return healthy + over_cap + over_rpm + cooling + (exhausted if (not_exhausted or _low_healthy) else []) + stagger_locked + circuit_open
 
