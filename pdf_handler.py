@@ -268,7 +268,12 @@ class GeminiKeyRotator:
     # grouping is unknown -- see GLOBAL_CONCURRENT_CAP below for the
     # mapping-independent safeguard.
 
-    GLOBAL_CONCURRENT_CAP = 12  # hard ceiling on simultaneous in-flight Gemini
+    GLOBAL_CONCURRENT_CAP = 12  # reverted back to 12 (2026-11-18) -- raising
+    # this was considered to improve throughput, but the actual bottleneck
+    # was the healthiest_first account-bunching bug (now fixed separately),
+    # not this cap. Raising concurrency itself is exactly what caused the
+    # prior 34-key mass-ban, so left untouched to stay TOS-safe. hard
+    # ceiling on simultaneous in-flight Gemini
     # calls across ALL keys/accounts combined, regardless of grouping info.
     # History: 20 -> 8 -> 6 -> 8 (2026-09-03 second pass). The 34-key mass-ban
     # that day was overwhelmingly on keys still inside WARMUP window (0.3-0.8d
@@ -281,7 +286,11 @@ class GeminiKeyRotator:
     # same reason: spreads call-starts out in time so concurrent load never
     # looks like an instantaneous fan-out burst.
 
-    DISTINCT_ACCOUNT_CONCURRENT_CAP = 3  # hard ceiling on how many DIFFERENT
+    DISTINCT_ACCOUNT_CONCURRENT_CAP = 3  # reverted back to 3 (2026-11-18) --
+    # same reasoning as GLOBAL_CONCURRENT_CAP above: the real fix was account
+    # diversity in key ORDER (healthiest_first bug), not raising how many
+    # accounts fire at once, which is the exact pattern Google's abuse
+    # detection flagged before. hard ceiling on how many DIFFERENT
     # accounts can have an in-flight call at the same instant, independent of
     # GLOBAL_CONCURRENT_CAP (which only bounds total call count, not account
     # diversity). All keys/accounts share one egress IP here, so N different
