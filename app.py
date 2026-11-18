@@ -28910,6 +28910,26 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                     if _fallback_model is None:
                         key_rotator.mark_rate_limited(key, daily_exhausted=daily, retry_after_seconds=retry_s)
                     logger.warning(f"[QBM] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key | raw_error={full_msg[:1500]}")
+                    # 2026-11-18 FIX: a 429 PerMinute hit across many
+                    # DIFFERENT keys/projects back-to-back is the same
+                    # "whole-model saturated" signal as 503/504 -- it was
+                    # previously exempt from the outage counter below (this
+                    # branch returns via `continue` before reaching it), so
+                    # a sustained 429 wave burned through the full key pool
+                    # one key at a time instead of fast-switching models.
+                    # Only count PerMinute (not PerDay -- that's genuinely
+                    # per-key/account exhaustion, unrelated to model health).
+                    if not daily:
+                        _consec_outage_fails += 1
+                        _last_outage_acct = key_rotator.account_of(key)
+                        if _consec_outage_fails >= 3:
+                            _cur_model_name = _fallback_model or "gemini-3.6-flash"
+                            _note_model_outage_fail(_cur_model_name)
+                            _next_model = _next_fallback_model(_cur_model_name)
+                            if _next_model is not None:
+                                logger.warning(f"[QBM] 3 consecutive 429/outage failures on {_cur_model_name} — switching to {_next_model} immediately (no wait, {_cur_model_name} now in 5-min cooldown)")
+                                return await _qbm_gemini_raw(img, prompt, careful=careful, gemini_only=gemini_only,
+                                                              _fallback_model=(None if _next_model == "gemini-3.6-flash" else _next_model))
                     continue
                 if _is_auth_ban_error(full_msg):
                     key_rotator.mark_banned(key, reason=full_msg[:200])
