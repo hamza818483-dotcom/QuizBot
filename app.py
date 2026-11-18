@@ -904,6 +904,12 @@ PDF_AUTO_ENABLED = {}  # chat_id -> bool (in-memory, also saved to DB) — /pdf 
 import contextvars
 import itertools
 CANCEL_FLAGS = {}  # chat_id -> bool, checked by long loops between steps
+QBM_LAST_DASHBOARD_TEXT = {}  # chat_id -> last-rendered dashboard text, so
+# the Cancel-button handler can APPEND the "বন্ধ করা হলো" confirmation to the
+# dashboard's own last known text and edit the SAME message in place (one
+# combined message, cancel line separated by a divider) instead of either
+# overwriting the dashboard's progress history or sending a separate new
+# message (user request 2026-11-18).
 ACTIVE_JOB_LABEL = {}  # chat_id -> human-readable label of the job currently running
 CURRENT_JOB_ID = {}  # chat_id -> int, id of the job currently running in that chat
 
@@ -34190,6 +34196,7 @@ async def qbm_extract_all_pages(
                 _qbm_last_edit_ts[0] = time.time()
                 await edit_msg(chat_id, status_msg_id, text, reply_markup=_cancel_kb(chat_id))
                 _qbm_last_dash_text[0] = text
+                QBM_LAST_DASHBOARD_TEXT[chat_id] = text
             except Exception:
                 pass
 
@@ -34522,6 +34529,7 @@ async def qbm_extract_all_pages(
             results[idx] = (page_num, img, mcqs)
 
     _qbm_dash_stop.set()
+    QBM_LAST_DASHBOARD_TEXT.pop(chat_id, None)
     try:
         await asyncio.wait_for(_qbm_ticker_task, timeout=2)
     except Exception:
@@ -39866,17 +39874,23 @@ async def handle_callback(query: dict):
             # cancel-confirmation টা একদম আলাদা, নতুন একটা msg হিসেবে নিচে
             # পাঠানো হয় -- আগে dashboard msg-ই edit করে cancel-text বসানো হতো,
             # যেটা ticker/background task দিয়ে আবার ওভাররাইট হয়ে যাচ্ছিল।
-            cancel_text = "━━━━━━━━━━━━━━━\n🛑 বন্ধ করা হলো।" + (f"\nযে কাজ থামলো: {running_label}" if running_label else "")
+            cancel_line = "━━━━━━━━━━━━━━━\n🛑 বন্ধ করা হলো।" + (f"\nযে কাজ থামলো: {running_label}" if running_label else "")
+            _dash_text = QBM_LAST_DASHBOARD_TEXT.get(target_chat)
             try:
-                # dashboard msg-এর TEXT অপরিবর্তিত রাখতে editMessageText না দিয়ে
-                # শুধু editMessageReplyMarkup দিয়ে বাটন সরানো হয়।
-                await tg_post("editMessageReplyMarkup", {
-                    "chat_id": chat_id, "message_id": msg_id,
-                    "reply_markup": {"inline_keyboard": []}
-                })
+                if _dash_text:
+                    # dashboard-এর সর্বশেষ জানা text-এর নিচে cancel line জুড়ে
+                    # দিয়ে SAME message-টাই edit করা হয় (append, replace না) --
+                    # ফলে page-by-page progress history থেকে যায়, cancel
+                    # confirmation সেই একই message-এর অংশ হিসেবে নিচে বসে।
+                    await edit_msg(chat_id, msg_id, _dash_text + "\n\n" + cancel_line, reply_markup={"inline_keyboard": []})
+                else:
+                    await tg_post("editMessageReplyMarkup", {
+                        "chat_id": chat_id, "message_id": msg_id,
+                        "reply_markup": {"inline_keyboard": []}
+                    })
+                    await send_msg(chat_id, cancel_line)
             except Exception:
-                pass
-            await send_msg(chat_id, cancel_text)
+                await send_msg(chat_id, cancel_line)
             return
         if data.startswith(("spch_", "spdm_", "spfl_", "spil_", "spgr_", "spgid_", "spmode_", "spwords_",
                              "spgadd_", "spgview_", "spgdel_", "spgback_", "spfltoggle_", "spflact_")) or data == "spback":
