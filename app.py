@@ -28480,27 +28480,36 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 api_key=key,
                 http_options=types.HttpOptions(timeout=38000)
             )
+            # 2026-11-18 FIX: gemini-3.5-flash-lite rejects thinking_config
+            # entirely (400 INVALID_ARGUMENT on EVERY key, not a per-key
+            # issue) -- unlike 3.6-flash/3.5-flash/4-hydrogen which accept
+            # thinking_budget=0. Confirmed from prod logs: the fallback
+            # pass to flash-lite burned through 90+ keys in ~45s, all 400,
+            # before the page hit its 120s timeout. Only attach
+            # thinking_config for models that support it.
+            _cfg_kwargs = dict(
+                temperature=0.1,
+                # 2026-09-08 FIX: 12288 was truncating output JSON mid-array
+                # on dense pages (many MCQs + long verbatim "Explanation:"
+                # text) -- output gets cut before the closing "]", the
+                # array becomes invalid JSON, repair-parser can't recover
+                # a coherent list, page comes back as 0 MCQ EVERY retry
+                # (deterministic, not key/quota related -- same page always
+                # produces the same length output and hits the same wall).
+                # Raised to 24576 to give headroom for a full 20+ MCQ page
+                # with long explanations.
+                max_output_tokens=24576,
+                response_mime_type="application/json",
+            )
+            if model_name != "gemini-3.5-flash-lite":
+                _cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=768 if careful else 0)
             return client.models.generate_content(
                 model=model_name,
                 contents=[
                     types.Part.from_text(text=prompt),
                     types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
                 ],
-                config=types.GenerateContentConfig(
-                    temperature=0.1,
-                    # 2026-09-08 FIX: 12288 was truncating output JSON mid-array
-                    # on dense pages (many MCQs + long verbatim "Explanation:"
-                    # text) -- output gets cut before the closing "]", the
-                    # array becomes invalid JSON, repair-parser can't recover
-                    # a coherent list, page comes back as 0 MCQ EVERY retry
-                    # (deterministic, not key/quota related -- same page always
-                    # produces the same length output and hits the same wall).
-                    # Raised to 24576 to give headroom for a full 20+ MCQ page
-                    # with long explanations.
-                    max_output_tokens=24576,
-                    response_mime_type="application/json",
-                    thinking_config=types.ThinkingConfig(thinking_budget=768 if careful else 0)
-                )
+                config=types.GenerateContentConfig(**_cfg_kwargs)
             )
 
         _avoid_accts = _qbm_page_used_accounts_ctx.get() or set()
