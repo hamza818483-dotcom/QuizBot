@@ -303,20 +303,35 @@ _install_asyncio_exception_handler()
 _mem_kv: dict = {}
 
 async def d1_set(key: str, value: dict, ttl: int = 86400):
-    try:
-        c = await _get_shared_http_client()
-        r = await c.post(f"{CF_WORKER_URL}/d1/set",
-            json={"key": key, "value": value, "ttl": ttl}, timeout=15)
-        if r.text.strip():
-            ok = r.json().get("ok", False)
-            if ok:
-                _mem_kv[key] = value  # mirror to memory
-                return True
-        return True
-    except Exception as e:
-        logger.warning(f"[D1] set warn (using memory): {e}")
-        _mem_kv[key] = value  # fallback: RAM
-        return True
+    """2026-11-18 (user request): CF Worker's /d1/set was returning bare
+    HTTP 500 for a stretch (D1-side issue, not a network exception, so the
+    old code's try/except never caught it) -- qs_{uid}/lq_{uid} live-quiz
+    state was silently NOT persisting to D1 while quietly returning True.
+    Now: up to 2 retries (3 attempts total, small backoff) on a non-2xx
+    response before falling back to memory, and a clear warning naming the
+    status code + key so this is visible in logs instead of invisible."""
+    _mem_kv[key] = value  # always mirror to memory first -- never lost even if D1 fails
+    last_status = None
+    last_err = None
+    for attempt in range(3):
+        try:
+            c = await _get_shared_http_client()
+            r = await c.post(f"{CF_WORKER_URL}/d1/set",
+                json={"key": key, "value": value, "ttl": ttl}, timeout=15)
+            if r.status_code >= 200 and r.status_code < 300 and r.text.strip():
+                ok = r.json().get("ok", False)
+                if ok:
+                    return True
+            last_status = r.status_code
+        except Exception as e:
+            last_err = e
+        if attempt < 2:
+            await asyncio.sleep(0.4 * (attempt + 1))  # 0.4s, 0.8s backoff
+    if last_err:
+        logger.warning(f"[D1] set FAILED for key={key} after 3 attempts (using memory fallback): {last_err}")
+    else:
+        logger.warning(f"[D1] set FAILED for key={key} after 3 attempts -- CF Worker returned HTTP {last_status} every time (using memory fallback)")
+    return True
 
 async def d1_get(key: str) -> dict:
     try:
