@@ -1017,26 +1017,27 @@ def _wrap_dl_progress_cb(chat_id, status_msg_id, inner_cb):
 
 async def _dl_cancel_delete_msg(chat_id, status_msg_id):
     """Call ONLY from the dlcancel_ callback handler, right after setting
-    the flag. Deletes the progress message WITHOUT touching the flag --
-    popping it here (as the old combined _dl_cancel_cleanup did) raced
-    with the download's own in-flight progress_cb check: the flag could
-    be cleared before that check ever ran, so _DownloadCancelled never
-    got raised and the transfer kept running in the background even
-    though the message was already gone. The flag itself is cleared
-    later by _dl_cancel_cleanup, once the except-block has actually
-    caught the cancellation."""
+    the flag. Per explicit user preference (2026-11-18): the message must
+    stay visible until the download has ACTUALLY stopped -- deleting it
+    immediately made it look cancelled while chunks kept running in the
+    background for a few more seconds. So this only EDITS the message to
+    a "stopping..." state (no Cancel button, so a double-tap is a no-op);
+    the real delete happens in _dl_cancel_cleanup, only after the
+    download's own except-block has caught _DownloadCancelled."""
     try:
-        await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": status_msg_id})
+        await tg_post("editMessageText", {
+            "chat_id": chat_id, "message_id": status_msg_id,
+            "text": "🛑 Download বন্ধ করা হচ্ছে...",
+        })
     except Exception as e:
-        logger.warning(f"[dlcancel] failed to delete status msg {status_msg_id}: {e}")
+        logger.warning(f"[dlcancel] failed to edit status msg {status_msg_id}: {e}")
 
 
 async def _dl_cancel_cleanup(chat_id, status_msg_id):
     """Call this from the try/except around every wrapped download, AFTER
-    _DownloadCancelled has actually been caught -- clears the flag so
-    stale entries don't accumulate, and deletes the progress message as a
-    fallback in case the dlcancel_ callback's own delete (above) didn't
-    fire (e.g. a race where this except-block runs first)."""
+    _DownloadCancelled has actually been caught -- i.e. the transfer has
+    genuinely stopped. Clears the flag (so stale entries don't accumulate)
+    and ONLY NOW deletes the progress message."""
     key = f"{chat_id}_{status_msg_id}"
     _DL_CANCEL_FLAGS.pop(key, None)
     try:
@@ -12792,7 +12793,10 @@ async def _handle_cut_pdf_command_inner(msg: dict):
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id, "✅ Download সম্পূর্ণ!\n⏳ Cut হচ্ছে...")
         except _DownloadCancelled:
-            # dlcancel_ callback already deleted the status message.
+            # dlcancel_ callback only edited the message; this is the
+            # real stop point now that the transfer has actually stopped.
+            if status_msg_id:
+                await _dl_cancel_cleanup(chat_id, status_msg_id)
             if disk_src_path:
                 try:
                     os.remove(disk_src_path)
@@ -12987,7 +12991,10 @@ async def _handle_cut_csv_command_inner(msg: dict):
             await edit_msg(chat_id, status_msg_id, "✅ Download সম্পূর্ণ!\n[██████████ 100%]\n⏳ CSV parse হচ্ছে...")
         mcqs = _parse_csv_bytes(csv_bytes)
     except _DownloadCancelled:
-        # dlcancel_ callback already deleted the status message.
+        # dlcancel_ callback only edited the message; this is the real
+        # stop point now that the transfer has actually stopped.
+        if status_msg_id:
+            await _dl_cancel_cleanup(chat_id, status_msg_id)
         return
     except Exception as e:
         logger.error(f"[Cut] error: {e}", exc_info=True)
@@ -19136,8 +19143,9 @@ async def _handle_dagano_impl(msg: dict):
             reply_markup=kb)
 
     except _DownloadCancelled:
-        # download-phase Cancel pressed; dlcancel_ callback already deleted the message.
-        pass
+        # download-phase Cancel pressed -- dlcancel_ callback only edited
+        # the message; this is the real stop point, delete it now.
+        await _dl_cancel_cleanup(chat_id, status_msg_id)
     except Exception as e:
         logger.error(f"[Dagano] Handle error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -19560,8 +19568,9 @@ async def _handle_extra_impl(msg: dict):
             await notify_owner(f"[Extra] CSV send failed: {csv_err}")
 
     except _DownloadCancelled:
-        # download-phase Cancel pressed; dlcancel_ callback already deleted the message.
-        pass
+        # download-phase Cancel pressed -- dlcancel_ callback only edited
+        # the message; this is the real stop point, delete it now.
+        await _dl_cancel_cleanup(chat_id, status_msg_id)
     except Exception as e:
         logger.error(f"[Extra] Handle error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -19705,7 +19714,9 @@ async def handle_ocr(msg: dict):
             await edit_msg(chat_id, st_id, f"🔎 OCR চলছে...\n📄 {fname}\n[{_bar(0)} 0%]\n(পেজ বেশি হলে সময় লাগবে)")
         out, info = await ocr_pdf(pdf_bytes, spec, progress_cb=_ocr_progress)
     except _DownloadCancelled:
-        return  # dlcancel_ callback already deleted the progress message
+        if st_id:
+            await _dl_cancel_cleanup(chat_id, st_id)
+        return
     except Exception as e:
         logger.warning(f"[ocr] failed: {type(e).__name__}: {e}")
         if st_id:
@@ -20013,8 +20024,9 @@ async def handle_pdf(msg: dict):
         await process_pdf_pages(chat_id, uid, uname, pages, topic, mcq_count,
             channel_id, False, file_name, status_msg_id, thread_id=thread_id, skip_generate=False)
     except _DownloadCancelled:
-        # download-phase Cancel pressed; dlcancel_ callback already deleted the message.
-        pass
+        # download-phase Cancel pressed -- dlcancel_ callback only edited
+        # the message; this is the real stop point, delete it now.
+        await _dl_cancel_cleanup(chat_id, status_msg_id)
     except Exception as e:
         logger.error(f"[PDF] Handle error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -22296,8 +22308,9 @@ async def handle_pdfm(msg: dict):
             file_id=file_id, page_range_str=page_range)
 
     except _DownloadCancelled:
-        # download-phase Cancel pressed; dlcancel_ callback already deleted the message.
-        pass
+        # download-phase Cancel pressed -- dlcancel_ callback only edited
+        # the message; this is the real stop point, delete it now.
+        await _dl_cancel_cleanup(chat_id, status_msg_id)
     except Exception as e:
         logger.error(f"[PDFM] Error: {e}")
         await _safe_error_reply(chat_id, e)
@@ -30591,12 +30604,13 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
             channel_id, False, file_name, status_msg_id, thread_id, skip_extract=True)
 
     except _DownloadCancelled:
-        # 2026-11-18 (user request): Cancel button pressed during the
-        # download phase -- the dlcancel_ callback already deleted the
-        # progress message, so there's nothing else to do here. The
-        # Exception branch below would otherwise also fire and send an
-        # unwanted "❌ Error" message on top of the cancellation.
-        pass
+        # 2026-11-18 (user request): Cancel pressed during the download
+        # phase -- dlcancel_ callback only edited the message to keep it
+        # visible until the transfer actually stops; this is that stop
+        # point, so delete it for real now. The Exception branch below
+        # would otherwise also fire and send an unwanted "❌ Error"
+        # message on top of the cancellation.
+        await _dl_cancel_cleanup(chat_id, status_msg_id)
     except Exception as e:
         logger.error(f"[QBM] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -30882,9 +30896,11 @@ async def _handle_topic_impl(msg: dict):
                 f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।")
 
     except _DownloadCancelled:
-        # 2026-11-18 (user request): download-phase Cancel button pressed;
-        # dlcancel_ callback already deleted the progress message.
-        pass
+        # 2026-11-18 (user request): download-phase Cancel pressed. The
+        # dlcancel_ callback only EDITED the message (kept it visible
+        # until the transfer actually stops) -- this is that stop point,
+        # so delete it for real now.
+        await _dl_cancel_cleanup(chat_id, status_msg_id)
     except Exception as e:
         logger.error(f"[TOPIC] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -31059,9 +31075,11 @@ async def _handle_eng_impl(msg: dict):
                 f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।")
 
     except _DownloadCancelled:
-        # 2026-11-18 (user request): download-phase Cancel button pressed;
-        # dlcancel_ callback already deleted the progress message.
-        pass
+        # 2026-11-18 (user request): download-phase Cancel pressed. The
+        # dlcancel_ callback only EDITED the message (kept it visible
+        # until the transfer actually stops) -- this is that stop point,
+        # so delete it for real now.
+        await _dl_cancel_cleanup(chat_id, status_msg_id)
     except Exception as e:
         logger.error(f"[ENG] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -31202,9 +31220,11 @@ async def handle_biot(msg: dict):
             await send_msg(chat_id, result[:4000])
 
     except _DownloadCancelled:
-        # 2026-11-18 (user request): download-phase Cancel button pressed;
-        # dlcancel_ callback already deleted the progress message.
-        pass
+        # 2026-11-18 (user request): download-phase Cancel pressed. The
+        # dlcancel_ callback only EDITED the message (kept it visible
+        # until the transfer actually stops) -- this is that stop point,
+        # so delete it for real now.
+        await _dl_cancel_cleanup(chat_id, status_msg_id)
     except Exception as e:
         logger.error(f"[BIOT] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -31361,9 +31381,11 @@ async def _handle_bio_impl(msg: dict):
                 f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।")
 
     except _DownloadCancelled:
-        # 2026-11-18 (user request): download-phase Cancel button pressed;
-        # dlcancel_ callback already deleted the progress message.
-        pass
+        # 2026-11-18 (user request): download-phase Cancel pressed. The
+        # dlcancel_ callback only EDITED the message (kept it visible
+        # until the transfer actually stops) -- this is that stop point,
+        # so delete it for real now.
+        await _dl_cancel_cleanup(chat_id, status_msg_id)
     except Exception as e:
         logger.error(f"[BIO] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -31574,9 +31596,11 @@ async def _handle_unmesh_impl(msg: dict):
         )
 
     except _DownloadCancelled:
-        # 2026-11-18 (user request): download-phase Cancel button pressed;
-        # dlcancel_ callback already deleted the progress message.
-        pass
+        # 2026-11-18 (user request): download-phase Cancel pressed. The
+        # dlcancel_ callback only EDITED the message (kept it visible
+        # until the transfer actually stops) -- this is that stop point,
+        # so delete it for real now.
+        await _dl_cancel_cleanup(chat_id, status_msg_id)
     except Exception as e:
         logger.error(f"[UNMESH] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -31792,9 +31816,11 @@ async def _handle_bcs_impl(msg: dict):
         )
 
     except _DownloadCancelled:
-        # 2026-11-18 (user request): download-phase Cancel button pressed;
-        # dlcancel_ callback already deleted the progress message.
-        pass
+        # 2026-11-18 (user request): download-phase Cancel pressed. The
+        # dlcancel_ callback only EDITED the message (kept it visible
+        # until the transfer actually stops) -- this is that stop point,
+        # so delete it for real now.
+        await _dl_cancel_cleanup(chat_id, status_msg_id)
     except Exception as e:
         logger.error(f"[BCS] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -31938,9 +31964,11 @@ async def handle_chemt(msg: dict):
             await send_msg(chat_id, result[:4000])
 
     except _DownloadCancelled:
-        # 2026-11-18 (user request): download-phase Cancel button pressed;
-        # dlcancel_ callback already deleted the progress message.
-        pass
+        # 2026-11-18 (user request): download-phase Cancel pressed. The
+        # dlcancel_ callback only EDITED the message (kept it visible
+        # until the transfer actually stops) -- this is that stop point,
+        # so delete it for real now.
+        await _dl_cancel_cleanup(chat_id, status_msg_id)
     except Exception as e:
         logger.error(f"[CHEMT] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -32099,9 +32127,11 @@ async def _handle_chem_impl(msg: dict):
                 f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।")
 
     except _DownloadCancelled:
-        # 2026-11-18 (user request): download-phase Cancel button pressed;
-        # dlcancel_ callback already deleted the progress message.
-        pass
+        # 2026-11-18 (user request): download-phase Cancel pressed. The
+        # dlcancel_ callback only EDITED the message (kept it visible
+        # until the transfer actually stops) -- this is that stop point,
+        # so delete it for real now.
+        await _dl_cancel_cleanup(chat_id, status_msg_id)
     except Exception as e:
         logger.error(f"[CHEM] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -33338,9 +33368,11 @@ async def _handle_onu_impl(msg: dict):
         return
 
     except _DownloadCancelled:
-        # 2026-11-18 (user request): download-phase Cancel button pressed;
-        # dlcancel_ callback already deleted the progress message.
-        pass
+        # 2026-11-18 (user request): download-phase Cancel pressed. The
+        # dlcancel_ callback only EDITED the message (kept it visible
+        # until the transfer actually stops) -- this is that stop point,
+        # so delete it for real now.
+        await _dl_cancel_cleanup(chat_id, status_msg_id)
     except Exception as e:
         logger.error(f"[ONU] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -34506,9 +34538,11 @@ async def _handle_onu2_impl(msg: dict):
             await send_msg(chat_id, "❌ কোনো red-box marked MCQ পাওয়া যায়নি।")
         return
     except _DownloadCancelled:
-        # 2026-11-18 (user request): download-phase Cancel button pressed;
-        # dlcancel_ callback already deleted the progress message.
-        pass
+        # 2026-11-18 (user request): download-phase Cancel pressed. The
+        # dlcancel_ callback only EDITED the message (kept it visible
+        # until the transfer actually stops) -- this is that stop point,
+        # so delete it for real now.
+        await _dl_cancel_cleanup(chat_id, status_msg_id)
     except Exception as e:
         logger.error(f"[ONU2] failed: {e}", exc_info=True)
         if status_msg_id:
@@ -40479,7 +40513,7 @@ async def handle_callback(query: dict):
             if not await db_is_owner_or_admin(uid):
                 return
             _DL_CANCEL_FLAGS[f"{target_chat}_{dl_status_msg_id}"] = True
-            await tg_post("answerCallbackQuery", {"callback_query_id": query.get("id"), "text": "🛑 Download বাতিল করা হলো"})
+            await tg_post("answerCallbackQuery", {"callback_query_id": query.get("id"), "text": "🛑 বন্ধ করা হচ্ছে..."})
             await _dl_cancel_delete_msg(target_chat, dl_status_msg_id)
             return
         if data.startswith("jobcancel_"):
