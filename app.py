@@ -39859,20 +39859,24 @@ async def handle_callback(query: dict):
             if _active_task and not _active_task.done():
                 _active_task.cancel()  # kill the in-flight API call immediately, don't wait for it to finish naturally
             running_label = ACTIVE_JOB_LABEL.get(target_chat)
-            # Cancel-এর msg নতুন করে DM-এ পাঠানো হবে না -- বরং এই বাটনটা যে
-            # dashboard message-এর গায়ে বসানো ছিল, সেই message-টাকেই edit করে
-            # cancel-confirmation টেক্সট বসানো হয় এবং বাটন সরিয়ে ফেলা হয় (reply_markup=None),
-            # /img, /pdf, /qbm -- সবক্ষেত্রেই একই আচরণ (user request 18 Nov).
+            # 2026-11-18 (user request): dashboard message টা (যেটায় live
+            # page-by-page progress দেখাচ্ছিল) আর edit করা হবে না -- সেটা যেমন
+            # ছিল তেমনই থাকবে, শুধু তার Cancel বাটনটা সরিয়ে ফেলা হয় (খালি
+            # keyboard পাঠিয়ে, None দিলে টেলিগ্রাম পুরনো বাটন রেখে দেয়)।
+            # cancel-confirmation টা একদম আলাদা, নতুন একটা msg হিসেবে নিচে
+            # পাঠানো হয় -- আগে dashboard msg-ই edit করে cancel-text বসানো হতো,
+            # যেটা ticker/background task দিয়ে আবার ওভাররাইট হয়ে যাচ্ছিল।
             cancel_text = "🛑 বন্ধ করা হলো।" + (f"\nযে কাজ থামলো: {running_label}" if running_label else "")
             try:
-                # reply_markup={"inline_keyboard": []} পাঠানো জরুরি -- None দিলে
-                # edit_msg সেই key-ই payload-এ বসাবে না, ফলে টেলিগ্রাম পুরনো
-                # Cancel বাটনটা রেখেই দেবে। খালি keyboard পাঠালে বাটন সরে যায়।
-                await edit_msg(chat_id, msg_id, cancel_text, reply_markup={"inline_keyboard": []})
+                # dashboard msg-এর TEXT অপরিবর্তিত রাখতে editMessageText না দিয়ে
+                # শুধু editMessageReplyMarkup দিয়ে বাটন সরানো হয়।
+                await tg_post("editMessageReplyMarkup", {
+                    "chat_id": chat_id, "message_id": msg_id,
+                    "reply_markup": {"inline_keyboard": []}
+                })
             except Exception:
-                # edit ব্যর্থ হলে (message অনেক পুরনো/deleted ইত্যাদি) শুধু তখনই fallback
-                # হিসেবে নতুন msg পাঠানো হবে, যাতে ইউজার অন্তত নিশ্চিত হতে পারে কাজ থেমেছে।
-                await send_msg(chat_id, cancel_text)
+                pass
+            await send_msg(chat_id, cancel_text)
             return
         if data.startswith(("spch_", "spdm_", "spfl_", "spil_", "spgr_", "spgid_", "spmode_", "spwords_",
                              "spgadd_", "spgview_", "spgdel_", "spgback_", "spfltoggle_", "spflact_")) or data == "spback":
