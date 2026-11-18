@@ -1626,11 +1626,22 @@ async def _get_pyro_client():
 
 def _is_dl_cancel(e: BaseException) -> bool:
     """True if e is app.py's _DownloadCancelled (raised from the Cancel-button
-    progress wrapper). core.py can't import it (circular), so match by name.
+    progress wrapper) OR core.py's own _DownloadCancelled below (raised
+    directly inside _pyro_parallel_download's _fetch() tasks, bypassing
+    progress_cb). core.py can't import app.py's class (circular), so match
+    by name -- same name on both sides means one check covers both origins.
     Every progress_cb try/except in the download paths below MUST re-raise
     this, otherwise the Cancel button only deletes the message while the
     transfer keeps running (the original batch 1-3 behaviour)."""
     return type(e).__name__ == "_DownloadCancelled"
+
+
+class _DownloadCancelled(Exception):
+    """core.py's own copy of app.py's sentinel (see _is_dl_cancel) -- used
+    by _pyro_parallel_download to make a not-yet-dispatched chunk fetch
+    bail out immediately on cancel instead of issuing one more MTProto
+    round-trip first."""
+    pass
 
 
 async def _pyro_parallel_download(client, media, file_size: int, progress_cb=None, concurrency: int = 8) -> bytes:
@@ -1678,10 +1689,26 @@ async def _pyro_parallel_download(client, media, file_size: int, progress_cb=Non
             await session.invoke(raw.functions.auth.ImportAuthorization(id=exported.id, bytes=exported.bytes))
 
         sem = asyncio.Semaphore(max(1, concurrency))
+        # Cancel can land while several _fetch() tasks are already blocked
+        # inside session.invoke() (an MTProto round-trip) -- asyncio's own
+        # task.cancel() only delivers CancelledError at the NEXT await point
+        # inside that coroutine, so a task parked on invoke() can't react
+        # until that network call itself returns, letting it run to
+        # completion in the background even after the Cancel button has
+        # already deleted the progress message. A shared flag, checked
+        # BEFORE every invoke() (not just after), makes a not-yet-started
+        # _fetch() bail out immediately instead of issuing one more network
+        # call; combined with gather's own cancel-propagation below this
+        # bounds the "still running after Cancel" window to the handful of
+        # requests that were already in flight the instant Cancel was
+        # pressed, instead of every remaining chunk in the file.
+        _cancelled_evt = asyncio.Event()
 
         async def _fetch(i: int):
             nonlocal done_bytes
             async with sem:
+                if _cancelled_evt.is_set():
+                    raise _DownloadCancelled()
                 r = await session.invoke(
                     raw.functions.upload.GetFile(location=location, offset=i * chunk, limit=chunk),
                     sleep_threshold=30)
@@ -1691,12 +1718,18 @@ async def _pyro_parallel_download(client, media, file_size: int, progress_cb=Non
                 buf[i * chunk: i * chunk + len(b)] = b
                 done_bytes += len(b)
                 if progress_cb:
-                    await progress_cb(min(done_bytes, file_size), file_size)
+                    try:
+                        await progress_cb(min(done_bytes, file_size), file_size)
+                    except Exception as _pe:
+                        if _is_dl_cancel(_pe):
+                            _cancelled_evt.set()  # tell not-yet-started _fetch() tasks to stop queuing more invokes
+                        raise
 
         tasks = [asyncio.create_task(_fetch(i)) for i in range(n_chunks)]
         try:
             await asyncio.gather(*tasks)
         except BaseException:
+            _cancelled_evt.set()
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
