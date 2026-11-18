@@ -30624,6 +30624,50 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
             # the startup incomplete-job scan.
             await db_finish_page_job(_qbm_extract_job_id)
 
+        if is_cancelled(chat_id):
+            # 2026-11-18 (user request): 'qbm kaj cholakalin cancel korle
+            # jotuk mcq toiri hoise segulor csv pathate hobe' -- cancel
+            # pressed mid-extraction used to fall through into the
+            # channel-select / channel-posting branches below (which only
+            # send a CSV to chat_id in some of their sub-paths, or post
+            # straight to a channel with no CSV to the user at all), so a
+            # partially-finished job's already-extracted MCQs could be lost
+            # on cancel even though the work was done. Short-circuit here,
+            # unconditionally: whatever got extracted before Cancel was hit
+            # goes out as a CSV to the user right now, independent of
+            # channel_id/channel-list state.
+            total_mcq_found = sum(len(mcqs) for _, _, mcqs in extracted_pages)
+            if total_mcq_found:
+                _missing_exp_cancel = [m for _, _, mcqs in extracted_pages for m in mcqs if not (m.get("explanation") or "").strip()]
+                if _missing_exp_cancel:
+                    try:
+                        await _ai_generate_all_explanations(_missing_exp_cancel)
+                    except Exception as e:
+                        logger.warning(f"[QBM] cancel-path fallback explanation fill failed: {e}")
+                import io as _io_qc, csv as _csv_qc
+                _buf_qc = _io_qc.StringIO()
+                _w_qc = _csv_qc.writer(_buf_qc)
+                _w_qc.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
+                                  "answer", "explanation", "type", "section"])
+                _ans_map_qc = {"A": "1", "B": "2", "C": "3", "D": "4"}
+                for _, _, mcqs in extracted_pages:
+                    for m in mcqs:
+                        opts = m.get("options", ["", "", "", ""])
+                        _w_qc.writerow([
+                            m.get("question", ""), opts[0] if len(opts) > 0 else "",
+                            opts[1] if len(opts) > 1 else "", opts[2] if len(opts) > 2 else "",
+                            opts[3] if len(opts) > 3 else "", opts[4] if len(opts) > 4 else "",
+                            _ans_map_qc.get(m.get("answer", "A"), "1"),
+                            _strip_img_tag(m.get("explanation", "")), "1", "1"
+                        ])
+                await send_document(chat_id, _buf_qc.getvalue().encode("utf-8"),
+                    f"{topic}_QBM_cancelled.csv",
+                    caption=f"🛑 Cancel করা হয়েছে — ততক্ষণে extract হওয়া {total_mcq_found} MCQ CSV আকারে পাঠানো হলো।",
+                    mime_type="text/csv")
+            else:
+                await send_msg(chat_id, "🛑 Cancel করা হয়েছে — কোনো MCQ এখনও extract হয়নি, তাই CSV পাঠানো গেলো না।")
+            return
+
         if not channel_id:
             channels = await db_get_channels()
             if not channels:
@@ -30687,12 +30731,12 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
                     caption=f"📋 {topic} — {total_mcq_found} MCQ (Extracted){_model_caption_line(_qbm_all_mcqs_flat)}",
                     mime_type="text/csv",
                     reply_markup=_csv_kb)
+            # NOTE: a cancelled job never reaches this point any more -- the
+            # unconditional is_cancelled(chat_id) guard right after
+            # extraction (above, before the channel/channel-list check)
+            # now handles EVERY cancel case (0 MCQ or partial), so this
+            # elif is dead but left in place as a harmless fallback.
             elif is_cancelled(chat_id):
-                # 2026-11-18 (user request): 'qbm kaj cholakalin cancel korle
-                # jotuk kaj korse tottuk csv diye dite hobe' -- if cancel hit
-                # before even one MCQ was extracted, don't silently return
-                # with nothing; tell the user plainly instead of leaving
-                # them guessing what happened.
                 await send_msg(chat_id, "🛑 Cancel করা হয়েছে — কোনো MCQ এখনও extract হয়নি, তাই CSV পাঠানো গেলো না।")
             return
 
