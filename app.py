@@ -965,6 +965,68 @@ def _cancel_kb(chat_id, job_id=None) -> dict:
     return {"inline_keyboard": [[{"text": "🛑 Cancel", "callback_data": f"jobcancel_{chat_id}_{job_id}"}]]}
 
 
+# ============================================================
+# File-download Cancel button (2026-11-18, user request) — generic
+# across EVERY command that shows a "ডাউনলোড হচ্ছে..." progress message
+# (/qbm, /pdf, /onu, /bcs, /tf, /txt, cut/split/merge tools, etc).
+# Separate from jobcancel_/CANCEL_FLAGS above (that's for the AI
+# generation phase, which edits the dashboard message in place) --
+# this one is specifically for the FILE DOWNLOAD phase, and its
+# behavior is DELETE the progress message outright on cancel, not edit
+# it, per explicit user request.
+# ============================================================
+_DL_CANCEL_FLAGS = {}  # f"{chat_id}_{status_msg_id}" -> True once cancelled
+
+
+class _DownloadCancelled(Exception):
+    """Raised from inside a wrapped progress_cb to abort an in-flight
+    download_tg_file()/_download_pdf_cached() call as soon as the next
+    chunk's progress callback fires, instead of waiting for the whole
+    transfer to finish first."""
+    pass
+
+
+def _dlcancel_kb(chat_id, status_msg_id) -> dict:
+    return {"inline_keyboard": [[{
+        "text": "🛑 Cancel",
+        "callback_data": f"dlcancel_{chat_id}_{status_msg_id}",
+    }]]}
+
+
+def _wrap_dl_progress_cb(chat_id, status_msg_id, inner_cb):
+    """Wraps an existing progress_cb(done, total) so every call first
+    checks whether the Cancel button for THIS specific status_msg_id was
+    pressed, and if so raises _DownloadCancelled to unwind out of
+    download_tg_file's streaming loop immediately. inner_cb may be None
+    (download site with no existing progress UI) or a sync/async callable
+    -- either way the wrapped version stays compatible with
+    download_tg_file's own "call progress_cb, await if it returned a
+    coroutine" handling."""
+    key = f"{chat_id}_{status_msg_id}"
+
+    async def _wrapped(done, total):
+        if _DL_CANCEL_FLAGS.get(key):
+            raise _DownloadCancelled()
+        if inner_cb:
+            res = inner_cb(done, total)
+            if asyncio.iscoroutine(res):
+                await res
+
+    return _wrapped
+
+
+async def _dl_cancel_cleanup(chat_id, status_msg_id):
+    """Call this from the dlcancel_ callback handler AND from the
+    try/except around every wrapped download -- deletes the progress
+    message and clears the flag so stale entries don't accumulate."""
+    key = f"{chat_id}_{status_msg_id}"
+    _DL_CANCEL_FLAGS.pop(key, None)
+    try:
+        await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": status_msg_id})
+    except Exception as e:
+        logger.warning(f"[dlcancel] failed to delete status msg {status_msg_id}: {e}")
+
+
 def set_active_job(chat_id, label):
     ACTIVE_JOB_LABEL[chat_id] = label
 
@@ -30249,6 +30311,15 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
     status_r = await send_msg(chat_id, ("✅ Cached PDF ব্যবহার হচ্ছে...\n📄 " + file_name) if _is_cache_hit else
         ("⏳ " + ("Image" if is_image_reply else "PDF") + f" download হচ্ছে...\n📄 {file_name}\n[░░░░░░░░░░ 0%]"))
     status_msg_id = status_r.get("result", {}).get("message_id")
+    # 2026-11-18 (user request): Cancel button on every file-download
+    # progress message -- added via a follow-up edit_msg since the
+    # button's callback_data needs status_msg_id, which only exists
+    # after send_msg returns. Skipped on the cache-hit path (nothing to
+    # cancel, _is_cache_hit means the PDF is already in memory).
+    if status_msg_id and not _is_cache_hit:
+        _spawn_task(edit_msg(chat_id, status_msg_id,
+            "⏳ " + ("Image" if is_image_reply else "PDF") + f" download হচ্ছে...\n📄 {file_name}\n[░░░░░░░░░░ 0%]",
+            reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
 
     _last_pct = {"v": -1}
     _dl_start = time.time()
@@ -30266,16 +30337,18 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
         if pct > 0 and pct < 100:
             eta_s = int(elapsed * (100 - pct) / pct)
             eta_txt = f" | ETA {eta_s}s"
-        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ {label} download হচ্ছে...\n📄 {file_name}\n[{bar} {pct}%{eta_txt}]"))
+        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ {label} download হচ্ছে...\n📄 {file_name}\n[{bar} {pct}%{eta_txt}]",
+                             reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
 
+    _dl_progress_pdf_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, _dl_progress_pdf) if status_msg_id else _dl_progress_pdf
     try:
         if is_image_reply:
-            img_bytes = await download_tg_file(file_id, progress_cb=_dl_progress_pdf, chat_id=chat_id, message_id=reply["message_id"])
+            img_bytes = await download_tg_file(file_id, progress_cb=_dl_progress_pdf_wrapped, chat_id=chat_id, message_id=reply["message_id"])
             from PIL import Image as PILImage
             img = PILImage.open(BytesIO(img_bytes))
             pages = [(1, img)]
         else:
-            pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress_pdf, chat_id=chat_id,
+            pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress_pdf_wrapped, chat_id=chat_id,
                                                     message_id=reply["message_id"], file_unique_id=file_unique_id)
             _qbm_rss_log("after_download", pdf_mb=f"{len(pdf_bytes)/1024/1024:.1f}")
             ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range, False)
@@ -30426,6 +30499,13 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
         await process_qbm_pages(chat_id, uid, uname, extracted_pages, topic,
             channel_id, False, file_name, status_msg_id, thread_id, skip_extract=True)
 
+    except _DownloadCancelled:
+        # 2026-11-18 (user request): Cancel button pressed during the
+        # download phase -- the dlcancel_ callback already deleted the
+        # progress message, so there's nothing else to do here. The
+        # Exception branch below would otherwise also fire and send an
+        # unwanted "❌ Error" message on top of the cancellation.
+        pass
     except Exception as e:
         logger.error(f"[QBM] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -32910,6 +32990,12 @@ async def _handle_onu_impl(msg: dict):
 
     status_r = await send_msg(chat_id, "⏳ " + ("Image" if is_image_reply else "PDF") + f" download হচ্ছে...\n📄 {file_name}\n[░░░░░░░░░░ 0%]")
     status_msg_id = status_r.get("result", {}).get("message_id")
+    # 2026-11-18 (user request): Cancel button on every file-download
+    # progress message -- see _handle_qbm_impl for the full explanation.
+    if status_msg_id:
+        _spawn_task(edit_msg(chat_id, status_msg_id,
+            "⏳ " + ("Image" if is_image_reply else "PDF") + f" download হচ্ছে...\n📄 {file_name}\n[░░░░░░░░░░ 0%]",
+            reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
 
     _last_pct = {"v": -1}
     _dl_start = time.time()
@@ -32927,16 +33013,18 @@ async def _handle_onu_impl(msg: dict):
         if pct > 0 and pct < 100:
             eta_s = int(elapsed * (100 - pct) / pct)
             eta_txt = f" | ETA {eta_s}s"
-        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ {label} download হচ্ছে...\n📄 {file_name}\n[{bar} {pct}%{eta_txt}]"))
+        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ {label} download হচ্ছে...\n📄 {file_name}\n[{bar} {pct}%{eta_txt}]",
+                             reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
 
+    _dl_progress_pdf_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, _dl_progress_pdf) if status_msg_id else _dl_progress_pdf
     try:
         if is_image_reply:
-            img_bytes = await download_tg_file(file_id, progress_cb=_dl_progress_pdf, chat_id=chat_id, message_id=reply["message_id"])
+            img_bytes = await download_tg_file(file_id, progress_cb=_dl_progress_pdf_wrapped, chat_id=chat_id, message_id=reply["message_id"])
             from PIL import Image as PILImage
             img = PILImage.open(BytesIO(img_bytes))
             pages = [(1, img)]
         else:
-            pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress_pdf, chat_id=chat_id,
+            pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress_pdf_wrapped, chat_id=chat_id,
                                                     message_id=reply["message_id"], file_unique_id=file_unique_id)
             ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
             if not ok:
@@ -33078,6 +33166,10 @@ async def _handle_onu_impl(msg: dict):
                             reply_to_message_id=status_msg_id)
         return
 
+    except _DownloadCancelled:
+        # 2026-11-18 (user request): download-phase Cancel button pressed;
+        # dlcancel_ callback already deleted the progress message.
+        pass
     except Exception as e:
         logger.error(f"[ONU] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -34133,6 +34225,12 @@ async def _handle_onu2_impl(msg: dict):
 
     status_r = await send_msg(chat_id, "⏳ " + ("Image" if is_image_reply else "PDF") + f" download হচ্ছে...\n📄 {file_name}\n[░░░░░░░░░░ 0%]")
     status_msg_id = status_r.get("result", {}).get("message_id")
+    # 2026-11-18 (user request): Cancel button on every file-download
+    # progress message -- see _handle_qbm_impl for the full explanation.
+    if status_msg_id:
+        _spawn_task(edit_msg(chat_id, status_msg_id,
+            "⏳ " + ("Image" if is_image_reply else "PDF") + f" download হচ্ছে...\n📄 {file_name}\n[░░░░░░░░░░ 0%]",
+            reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
 
     _last_pct = {"v": -1}
     _dl_start = time.time()
@@ -34150,16 +34248,18 @@ async def _handle_onu2_impl(msg: dict):
         if pct > 0 and pct < 100:
             eta_s = int(elapsed * (100 - pct) / pct)
             eta_txt = f" | ETA {eta_s}s"
-        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ {label} download হচ্ছে...\n📄 {file_name}\n[{bar} {pct}%{eta_txt}]"))
+        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ {label} download হচ্ছে...\n📄 {file_name}\n[{bar} {pct}%{eta_txt}]",
+                             reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
 
+    _dl_progress_pdf_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, _dl_progress_pdf) if status_msg_id else _dl_progress_pdf
     try:
         if is_image_reply:
-            img_bytes = await download_tg_file(file_id, progress_cb=_dl_progress_pdf, chat_id=chat_id, message_id=reply["message_id"])
+            img_bytes = await download_tg_file(file_id, progress_cb=_dl_progress_pdf_wrapped, chat_id=chat_id, message_id=reply["message_id"])
             from PIL import Image as PILImage
             img = PILImage.open(BytesIO(img_bytes))
             pages = [(1, img)]
         else:
-            pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress_pdf, chat_id=chat_id,
+            pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress_pdf_wrapped, chat_id=chat_id,
                                                     message_id=reply["message_id"], file_unique_id=file_unique_id)
             ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
             if not ok:
@@ -34234,6 +34334,10 @@ async def _handle_onu2_impl(msg: dict):
         else:
             await send_msg(chat_id, "❌ কোনো red-box marked MCQ পাওয়া যায়নি।")
         return
+    except _DownloadCancelled:
+        # 2026-11-18 (user request): download-phase Cancel button pressed;
+        # dlcancel_ callback already deleted the progress message.
+        pass
     except Exception as e:
         logger.error(f"[ONU2] failed: {e}", exc_info=True)
         if status_msg_id:
@@ -40186,6 +40290,26 @@ async def handle_callback(query: dict):
                 return
             lms_job["cancel_requested"] = True
             await tg_post("answerCallbackQuery", {"callback_query_id": query.get("id"), "text": "🛑 বন্ধ করা হচ্ছে..."})
+            return
+        if data.startswith("dlcancel_"):
+            # 2026-11-18 (user request): Cancel button on every file-
+            # download progress message (/qbm, /pdf, and every other
+            # command's download step). Unlike jobcancel_ (generation
+            # phase, edits the dashboard in place), this one DELETES the
+            # download-progress message outright and aborts the transfer.
+            rest = data[len("dlcancel_"):]
+            parts = rest.rsplit("_", 1)
+            if len(parts) != 2 or not parts[1].isdigit() or not parts[0].lstrip("-").isdigit():
+                return
+            target_chat = int(parts[0])
+            dl_status_msg_id = int(parts[1])
+            if target_chat != chat_id:
+                return
+            if not await db_is_owner_or_admin(uid):
+                return
+            _DL_CANCEL_FLAGS[f"{target_chat}_{dl_status_msg_id}"] = True
+            await tg_post("answerCallbackQuery", {"callback_query_id": query.get("id"), "text": "🛑 Download বাতিল করা হলো"})
+            await _dl_cancel_cleanup(target_chat, dl_status_msg_id)
             return
         if data.startswith("jobcancel_"):
             rest = data[len("jobcancel_"):]
