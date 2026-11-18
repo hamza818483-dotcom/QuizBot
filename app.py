@@ -34168,6 +34168,14 @@ async def qbm_extract_all_pages(
         # call entirely when the text is unchanged (avoids Telegram's
         # "message is not modified" error burning a request for nothing).
         async with _qbm_dash_lock:
+            if is_cancelled(chat_id):
+                # Belt-and-suspenders: every caller of this function (ticker,
+                # per-page start/done, live stage callback) funnels through
+                # here, so guarding it in ONE place stops any of them from
+                # overwriting the cancel-button's "বন্ধ করা হলো" confirmation
+                # text back to the live dashboard after cancel was clicked
+                # (user report 2026-11-18).
+                return
             if strict_calls:
                 # never edit faster than Telegram allows (burst from stage changes + ticker)
                 if time.time() - _qbm_last_edit_ts[0] < (0.9 if chat_id > 0 else 2.9):
@@ -34193,6 +34201,16 @@ async def qbm_extract_all_pages(
             except asyncio.TimeoutError:
                 pass
             if _qbm_dash_stop.is_set():
+                break
+            if is_cancelled(chat_id):
+                # Cancel button edits the dashboard msg with a "বন্ধ করা
+                # হলো" confirmation, but this ticker runs as a separate
+                # background task and kept re-editing the SAME message with
+                # the live dashboard every few seconds regardless -- so the
+                # cancel confirmation got overwritten right back to the
+                # running dashboard a moment later, making cancel look like
+                # it did nothing (user report 2026-11-18). Stop ticking the
+                # instant cancel is seen, same as the extraction loop does.
                 break
             if status_msg_id:
                 await _qbm_safe_dash_edit()
