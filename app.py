@@ -39866,7 +39866,7 @@ async def handle_callback(query: dict):
             # cancel-confirmation টা একদম আলাদা, নতুন একটা msg হিসেবে নিচে
             # পাঠানো হয় -- আগে dashboard msg-ই edit করে cancel-text বসানো হতো,
             # যেটা ticker/background task দিয়ে আবার ওভাররাইট হয়ে যাচ্ছিল।
-            cancel_text = "🛑 বন্ধ করা হলো।" + (f"\nযে কাজ থামলো: {running_label}" if running_label else "")
+            cancel_text = "━━━━━━━━━━━━━━━\n🛑 বন্ধ করা হলো।" + (f"\nযে কাজ থামলো: {running_label}" if running_label else "")
             try:
                 # dashboard msg-এর TEXT অপরিবর্তিত রাখতে editMessageText না দিয়ে
                 # শুধু editMessageReplyMarkup দিয়ে বাটন সরানো হয়।
