@@ -19004,9 +19004,14 @@ async def _handle_dagano_impl(msg: dict):
 
     status_r = await send_msg(chat_id, "⏳ PDF download হচ্ছে...")
     status_msg_id = status_r.get("result", {}).get("message_id")
+    # 2026-11-18 (user request): Cancel button on file-download progress (batch 3).
+    if status_msg_id:
+        _spawn_task(edit_msg(chat_id, status_msg_id, "⏳ PDF download হচ্ছে...",
+                             reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
+    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, None) if status_msg_id else None
 
     try:
-        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id,
+        pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_cb_wrapped, chat_id=chat_id,
                                                 message_id=reply["message_id"], file_unique_id=file_unique_id)
 
         ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
@@ -19077,6 +19082,9 @@ async def _handle_dagano_impl(msg: dict):
             f"🎯 Topic: {topic}\n\nChannel select করো:",
             reply_markup=kb)
 
+    except _DownloadCancelled:
+        # download-phase Cancel pressed; dlcancel_ callback already deleted the message.
+        pass
     except Exception as e:
         logger.error(f"[Dagano] Handle error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -19448,9 +19456,14 @@ async def _handle_extra_impl(msg: dict):
 
     status_r = await send_msg(chat_id, "⏳ PDF download হচ্ছে...")
     status_msg_id = status_r.get("result", {}).get("message_id")
+    # 2026-11-18 (user request): Cancel button on file-download progress (batch 3).
+    if status_msg_id:
+        _spawn_task(edit_msg(chat_id, status_msg_id, "⏳ PDF download হচ্ছে...",
+                             reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
+    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, None) if status_msg_id else None
 
     try:
-        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id,
+        pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_cb_wrapped, chat_id=chat_id,
                                                 message_id=reply["message_id"], file_unique_id=file_unique_id)
 
         if page_range:
@@ -19493,6 +19506,9 @@ async def _handle_extra_impl(msg: dict):
             logger.warning(f"[Extra] CSV send failed: {csv_err}")
             await notify_owner(f"[Extra] CSV send failed: {csv_err}")
 
+    except _DownloadCancelled:
+        # download-phase Cancel pressed; dlcancel_ callback already deleted the message.
+        pass
     except Exception as e:
         logger.error(f"[Extra] Handle error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -19591,6 +19607,9 @@ async def handle_ocr(msg: dict):
     t0 = _time.monotonic()
     st = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {fname}\n[{_bar(0)} 0%]")
     st_id = (st or {}).get("result", {}).get("message_id")
+    if st_id:
+        _spawn_task(edit_msg(chat_id, st_id, f"⏳ PDF download হচ্ছে...\n📄 {fname}\n[{_bar(0)} 0%]",
+                             reply_markup=_dlcancel_kb(chat_id, st_id)))
 
     _last_dl_pct = {"v": -1}
 
@@ -19603,10 +19622,12 @@ async def handle_ocr(msg: dict):
             try:
                 await edit_msg(chat_id, st_id,
                     f"⏳ PDF download হচ্ছে...\n📄 {fname}\n"
-                    f"[{_bar(pct)} {pct}%]\n⏱ {_fmt_elapsed(_time.monotonic() - t0)}")
+                    f"[{_bar(pct)} {pct}%]\n⏱ {_fmt_elapsed(_time.monotonic() - t0)}",
+                    reply_markup=_dlcancel_kb(chat_id, st_id))
             except Exception:
                 pass
 
+    _dl_progress_w = _wrap_dl_progress_cb(chat_id, st_id, _dl_progress) if st_id else _dl_progress
     _last_ocr_pct = {"v": -1}
 
     async def _ocr_progress(done, total):
@@ -19625,11 +19646,13 @@ async def handle_ocr(msg: dict):
 
     try:
         pdf_bytes = await _download_pdf_cached(
-            doc["file_id"], progress_cb=_dl_progress, chat_id=chat_id,
+            doc["file_id"], progress_cb=_dl_progress_w, chat_id=chat_id,
             message_id=reply.get("message_id"), file_unique_id=doc.get("file_unique_id"))
         if st_id:
             await edit_msg(chat_id, st_id, f"🔎 OCR চলছে...\n📄 {fname}\n[{_bar(0)} 0%]\n(পেজ বেশি হলে সময় লাগবে)")
         out, info = await ocr_pdf(pdf_bytes, spec, progress_cb=_ocr_progress)
+    except _DownloadCancelled:
+        return  # dlcancel_ callback already deleted the progress message
     except Exception as e:
         logger.warning(f"[ocr] failed: {type(e).__name__}: {e}")
         if st_id:
@@ -19778,7 +19801,8 @@ async def handle_pdf(msg: dict):
         if status_msg_id:
             size_mb = round(file_size / 1024 / 1024, 1) if file_size else "?"
             await edit_msg(chat_id, status_msg_id,
-                f"⏳ PDF download হচ্ছে...\n📄 File: {file_name}\n📦 Size: {size_mb} MB\n[░░░░░░░░░░ 0%]")
+                f"⏳ PDF download হচ্ছে...\n📄 File: {file_name}\n📦 Size: {size_mb} MB\n[░░░░░░░░░░ 0%]",
+                reply_markup=_dlcancel_kb(chat_id, status_msg_id))
 
         _last_pct5820 = {"v": -1}
         def _dl_progress5820(done, total):
@@ -19791,9 +19815,11 @@ async def handle_pdf(msg: dict):
             bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
             size_mb = round(file_size / 1024 / 1024, 1) if file_size else "?"
             _spawn_task(edit_msg(chat_id, status_msg_id,
-                f"⏳ PDF download হচ্ছে...\n📄 File: {file_name}\n📦 Size: {size_mb} MB\n[{bar} {pct}%]"))
+                f"⏳ PDF download হচ্ছে...\n📄 File: {file_name}\n📦 Size: {size_mb} MB\n[{bar} {pct}%]",
+                reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
 
-        pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress5820, chat_id=chat_id, message_id=reply["message_id"], file_unique_id=file_unique_id)
+        _dl_progress5820_w = _wrap_dl_progress_cb(chat_id, status_msg_id, _dl_progress5820) if status_msg_id else _dl_progress5820
+        pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress5820_w, chat_id=chat_id, message_id=reply["message_id"], file_unique_id=file_unique_id)
 
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id,
@@ -19933,6 +19959,9 @@ async def handle_pdf(msg: dict):
         # instead of waiting for the whole PDF to finish generating.
         await process_pdf_pages(chat_id, uid, uname, pages, topic, mcq_count,
             channel_id, False, file_name, status_msg_id, thread_id=thread_id, skip_generate=False)
+    except _DownloadCancelled:
+        # download-phase Cancel pressed; dlcancel_ callback already deleted the message.
+        pass
     except Exception as e:
         logger.error(f"[PDF] Handle error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -22134,8 +22163,12 @@ async def handle_pdfm(msg: dict):
     file_name = reply["document"].get("file_name","document.pdf")
     file_size = reply["document"].get("file_size",0)
 
-    status_r = await send_msg(chat_id, "⏳ PDF download হচ্ছে...\n[░░░░░░░░░░ 0%]")
+    status_r = await send_msg(chat_id, "⏳ PDF download হচ্ছে...\n[░░░░░░░░░░ 0%]",
+                              reply_markup=None)
     status_msg_id = status_r.get("result",{}).get("message_id")
+    if status_msg_id:
+        _spawn_task(edit_msg(chat_id, status_msg_id, "⏳ PDF download হচ্ছে...\n[░░░░░░░░░░ 0%]",
+                             reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
 
     _last_pct6471 = {"v": -1}
     def _dl_progress6471(done, total):
@@ -22146,10 +22179,12 @@ async def handle_pdfm(msg: dict):
             return
         _last_pct6471["v"] = pct
         bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
-        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ PDF download হচ্ছে...\n[{bar} {pct}%]"))
+        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ PDF download হচ্ছে...\n[{bar} {pct}%]",
+                             reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
+    _dl_progress6471_w = _wrap_dl_progress_cb(chat_id, status_msg_id, _dl_progress6471) if status_msg_id else _dl_progress6471
 
     try:
-        pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress6471, chat_id=chat_id, message_id=reply["message_id"], file_unique_id=file_unique_id)
+        pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress6471_w, chat_id=chat_id, message_id=reply["message_id"], file_unique_id=file_unique_id)
         ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
         if not ok:
             await send_msg(chat_id, pages)
@@ -22207,6 +22242,9 @@ async def handle_pdfm(msg: dict):
             mcq_count, channel_id, False, file_name, status_msg_id, thread_id,
             file_id=file_id, page_range_str=page_range)
 
+    except _DownloadCancelled:
+        # download-phase Cancel pressed; dlcancel_ callback already deleted the message.
+        pass
     except Exception as e:
         logger.error(f"[PDFM] Error: {e}")
         await _safe_error_reply(chat_id, e)
