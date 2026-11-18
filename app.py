@@ -30670,6 +30670,13 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
                     caption=f"📋 {topic} — {total_mcq_found} MCQ (Extracted){_model_caption_line(_qbm_all_mcqs_flat)}",
                     mime_type="text/csv",
                     reply_markup=_csv_kb)
+            elif is_cancelled(chat_id):
+                # 2026-11-18 (user request): 'qbm kaj cholakalin cancel korle
+                # jotuk kaj korse tottuk csv diye dite hobe' -- if cancel hit
+                # before even one MCQ was extracted, don't silently return
+                # with nothing; tell the user plainly instead of leaving
+                # them guessing what happened.
+                await send_msg(chat_id, "🛑 Cancel করা হয়েছে — কোনো MCQ এখনও extract হয়নি, তাই CSV পাঠানো গেলো না।")
             return
 
 
