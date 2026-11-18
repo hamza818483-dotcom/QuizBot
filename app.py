@@ -28192,9 +28192,13 @@ async def _qbm_batch_backfill_gemini(img, items: list) -> dict:
             parts.append(
                 f'{{"idx":{it["idx"]},"task":"question","fragment":{json.dumps(it["q"])},"options":{json.dumps(opts_str)}}}'
             )
-        else:
+        elif it["type"] == "bbox":
             parts.append(
                 f'{{"idx":{it["idx"]},"task":"bbox","caption":{json.dumps(it["question"][:200])}}}'
+            )
+        else:  # "explanation"
+            parts.append(
+                f'{{"idx":{it["idx"]},"task":"explanation","question":{json.dumps(it["q"])},"options":{json.dumps(it["opts"])},"answer":{json.dumps(it["answer"])}}}'
             )
     prompt = f"""This exact page image has {len(items)} unresolved issue(s) from earlier extraction. Fix ALL of them in one pass by looking at the page image:
 
@@ -28202,6 +28206,7 @@ async def _qbm_batch_backfill_gemini(img, items: list) -> dict:
 
 For each item with "task":"question" -> find the REAL complete question text as printed on the page for that fragment (read the actual line, do not invent wording). If not found output "NOT_FOUND".
 For each item with "task":"bbox" -> find the diagram/figure this caption labels and output a tight [x1,y1,x2,y2] box (0-1000 scale) including labels/arrows with small margin. If not found output null.
+For each item with "task":"explanation" -> write a short, informative Bangla explanation (1-3 sentences) of why the given answer is correct, using the page content if relevant plus your own subject knowledge. Do NOT start with "সঠিক উত্তর" or mention the answer letter (A/B/C/D) -- start directly with the actual reasoning/fact.
 
 Return ONLY a JSON array, same order as input, one object per item:
 [{{"idx":<idx>,"result":"<question text or NOT_FOUND>"}}, {{"idx":<idx>,"result":[x1,y1,x2,y2] or null}}]
@@ -28243,6 +28248,7 @@ async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = False) -> l
     batch_items = []  # collected across the whole page -> ONE Gemini call at the end
     pending_question_idx = {}  # idx in fixed -> (q, opts) for batch fallback
     pending_bbox_idx = {}
+    pending_explanation_idx = {}  # idx in fixed -> answer letter, for batch explanation fallback
 
     for mc in mcqs:
         q = (mc.get("question") or "").strip()
@@ -28266,14 +28272,14 @@ async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = False) -> l
         _qbm_balance_answer_with_options(mc)
 
         if not (mc.get("explanation") or "").strip():
-            # SIMPLIFIED (per request): no extra AI call to generate a long
-            # explanation -- just a short deterministic "correct answer is X"
-            # line, zero extra tokens/API calls.
+            # REVERTED 2026-11-18 (user request): the old bare "সঠিক উত্তর:
+            # A (...)" line had zero actual explanation value. Queue a real
+            # AI-written explanation instead, batched into the SAME page
+            # call as the question/bbox backfills above -- still only one
+            # extra Gemini call per page, not one per MCQ.
             ans = mc.get("answer", "A")
-            opt_letters = ["A", "B", "C", "D"]
-            idx = opt_letters.index(ans) if ans in opt_letters else 0
-            ans_text = opts[idx] if idx < len(opts) else ""
-            mc["explanation"] = f"সঠিক উত্তর: {ans} ({ans_text})" if ans_text else f"সঠিক উত্তর: {ans}"
+            pending_explanation_idx[len(fixed)] = ans
+            batch_items.append({"idx": len(fixed), "type": "explanation", "q": q, "opts": opts, "answer": ans})
 
         if not mc.get("qsn_bbox") and "<img" not in mc["question"].lower() and _FIGURE_CAPTION_RE.search(mc["question"]):
             pending_bbox_idx[len(fixed)] = mc["question"]
@@ -28293,6 +28299,24 @@ async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = False) -> l
             if isinstance(r, list) and len(r) == 4:
                 fixed[idx]["qsn_bbox"] = r
                 logger.info(f"[QBM safety-net] Recovered missed diagram bbox for: {question[:50]}")
+        for idx, ans in pending_explanation_idx.items():
+            r = results.get(idx)
+            if isinstance(r, str) and r.strip():
+                fixed[idx]["explanation"] = r.strip()
+            else:
+                # Batch call failed/returned nothing for this item -- fall
+                # back to the old bare line rather than shipping no
+                # explanation at all.
+                opts = fixed[idx].get("options", [])
+                opt_letters = ["A", "B", "C", "D"]
+                oidx = opt_letters.index(ans) if ans in opt_letters else 0
+                ans_text = opts[oidx] if oidx < len(opts) else ""
+                fixed[idx]["explanation"] = f"সঠিক উত্তর: {ans} ({ans_text})" if ans_text else f"সঠিক উত্তর: {ans}"
+    else:
+        # No batch_items at all means pending_explanation_idx is also empty
+        # (both are only populated together in this loop), so nothing left
+        # to backfill here.
+        pass
 
     fixed = await _attach_option_images_if_missing(fixed, img)
     return fixed
