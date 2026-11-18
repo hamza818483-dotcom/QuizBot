@@ -6495,7 +6495,13 @@ async def _gemini_verify_raw_text(img, prompt: str, _fallback_model: str = None)
         if _fallback_model is None:
             logger.warning(f"[GeminiVerify] all {len(keys_to_try)} gemini-3.6-flash key(s) failed — retrying with gemini-3.5-flash-lite (separate quota)")
             return await _gemini_verify_raw_text(img, prompt, _fallback_model="gemini-3.5-flash-lite")
-        logger.warning(f"[GeminiVerify] all {len(keys_to_try)} Gemini key(s) failed (incl. fallback model) — returning empty")
+        if _fallback_model == "gemini-3.5-flash-lite":
+            logger.warning(f"[GeminiVerify] all {len(keys_to_try)} gemini-3.5-flash-lite key(s) failed — retrying with gemini-3.5-flash (separate quota)")
+            return await _gemini_verify_raw_text(img, prompt, _fallback_model="gemini-3.5-flash")
+        if _fallback_model == "gemini-3.5-flash":
+            logger.warning(f"[GeminiVerify] all {len(keys_to_try)} gemini-3.5-flash key(s) failed — retrying with gemini-4-hydrogen (separate compute pool)")
+            return await _gemini_verify_raw_text(img, prompt, _fallback_model="gemini-4-hydrogen")
+        logger.warning(f"[GeminiVerify] all {len(keys_to_try)} Gemini key(s) failed (incl. all fallback models) — returning empty")
         return ""
     except Exception as e:
         logger.warning(f"[GeminiVerify] failed: {e}")
@@ -17784,7 +17790,13 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str, _fallback_model: str
         if _fallback_model is None:
             logger.warning("[Dagano] All gemini-3.6-flash keys exhausted — retrying with gemini-3.5-flash-lite (separate quota)")
             return await _dagano_gemini_raw_multi(imgs, prompt, _fallback_model="gemini-3.5-flash-lite")
-        logger.warning("[Dagano] All Gemini keys exhausted (incl. fallback model) — no Groq fallback (Gemini-only mode)")
+        if _fallback_model == "gemini-3.5-flash-lite":
+            logger.warning("[Dagano] All gemini-3.5-flash-lite keys exhausted — retrying with gemini-3.5-flash (separate quota)")
+            return await _dagano_gemini_raw_multi(imgs, prompt, _fallback_model="gemini-3.5-flash")
+        if _fallback_model == "gemini-3.5-flash":
+            logger.warning("[Dagano] All gemini-3.5-flash keys exhausted — retrying with gemini-4-hydrogen (separate compute pool)")
+            return await _dagano_gemini_raw_multi(imgs, prompt, _fallback_model="gemini-4-hydrogen")
+        logger.warning("[Dagano] All Gemini keys exhausted (incl. all fallback models) — no Groq fallback (Gemini-only mode)")
         return ""
     except Exception as e:
         logger.warning(f"[Dagano] Gemini multi-image raw call failed: {e}")
@@ -28641,9 +28653,15 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
         if _fallback_model is None:
             logger.warning("[QBM] All gemini-3.6-flash keys exhausted — retrying with gemini-3.5-flash-lite (separate quota)")
             return await _qbm_gemini_raw(img, prompt, careful=careful, gemini_only=gemini_only, _fallback_model="gemini-3.5-flash-lite")
-        # Already on the fallback model and still exhausted -- Groq
+        if _fallback_model == "gemini-3.5-flash-lite":
+            logger.warning("[QBM] All gemini-3.5-flash-lite keys exhausted — retrying with gemini-3.5-flash (separate quota)")
+            return await _qbm_gemini_raw(img, prompt, careful=careful, gemini_only=gemini_only, _fallback_model="gemini-3.5-flash")
+        if _fallback_model == "gemini-3.5-flash":
+            logger.warning("[QBM] All gemini-3.5-flash keys exhausted — retrying with gemini-4-hydrogen (separate compute pool)")
+            return await _qbm_gemini_raw(img, prompt, careful=careful, gemini_only=gemini_only, _fallback_model="gemini-4-hydrogen")
+        # Already on the last fallback model and still exhausted -- Groq
         # disabled per user request, return empty.
-        logger.warning("[QBM] All Gemini keys exhausted (incl. fallback model) — returning empty (Groq fallback disabled per user request)")
+        logger.warning("[QBM] All Gemini keys exhausted (incl. all fallback models) — returning empty (Groq fallback disabled per user request)")
         return ""
     except Exception as e:
         logger.warning(f"[QBM] Gemini raw call failed: {e}")
@@ -28813,10 +28831,16 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
         if _fallback_model is None:
             logger.warning("[QBM] All gemini-3.6-flash keys exhausted (multi-image) — retrying with gemini-3.5-flash-lite (separate quota)")
             return await _qbm_gemini_raw_multi(imgs, prompt, gemini_only=gemini_only, _fallback_model="gemini-3.5-flash-lite")
+        if _fallback_model == "gemini-3.5-flash-lite":
+            logger.warning("[QBM] All gemini-3.5-flash-lite keys exhausted (multi-image) — retrying with gemini-3.5-flash (separate quota)")
+            return await _qbm_gemini_raw_multi(imgs, prompt, gemini_only=gemini_only, _fallback_model="gemini-3.5-flash")
+        if _fallback_model == "gemini-3.5-flash":
+            logger.warning("[QBM] All gemini-3.5-flash keys exhausted (multi-image) — retrying with gemini-4-hydrogen (separate compute pool)")
+            return await _qbm_gemini_raw_multi(imgs, prompt, gemini_only=gemini_only, _fallback_model="gemini-4-hydrogen")
         if gemini_only:
-            logger.warning(f"[QBM] All {len(keys_to_try)} attempted Gemini keys failed (incl. fallback model, gemini_only=True, no Groq) — returning empty")
+            logger.warning(f"[QBM] All {len(keys_to_try)} attempted Gemini keys failed (incl. all fallback models, gemini_only=True, no Groq) — returning empty")
             return ""
-        logger.warning("[QBM] All Gemini keys exhausted (incl. fallback model) — falling back to Groq vision (first image only)")
+        logger.warning("[QBM] All Gemini keys exhausted (incl. all fallback models) — falling back to Groq vision (first image only)")
         return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
     except Exception as e:
         logger.warning(f"[QBM] Gemini multi-image raw call failed: {e}")
@@ -28905,7 +28929,13 @@ async def _ai_gemini_text_call(prompt: str, gemini_only: bool = False, _fallback
         if _fallback_model is None:
             logger.warning("[AI] all gemini-3.6-flash keys exhausted/failed -- retrying with gemini-3.5-flash-lite (separate quota)")
             return await _ai_gemini_text_call(prompt, gemini_only=gemini_only, _fallback_model="gemini-3.5-flash-lite")
-        logger.warning("[AI] all Gemini keys exhausted/failed (incl. fallback model) -- falling back to Groq text")
+        if _fallback_model == "gemini-3.5-flash-lite":
+            logger.warning("[AI] all gemini-3.5-flash-lite keys exhausted/failed -- retrying with gemini-3.5-flash (separate quota)")
+            return await _ai_gemini_text_call(prompt, gemini_only=gemini_only, _fallback_model="gemini-3.5-flash")
+        if _fallback_model == "gemini-3.5-flash":
+            logger.warning("[AI] all gemini-3.5-flash keys exhausted/failed -- retrying with gemini-4-hydrogen (separate compute pool)")
+            return await _ai_gemini_text_call(prompt, gemini_only=gemini_only, _fallback_model="gemini-4-hydrogen")
+        logger.warning("[AI] all Gemini keys exhausted/failed (incl. all fallback models) -- falling back to Groq text")
         if gemini_only:
             return ""
         return await _qbm_groq_text_call(prompt)
@@ -34039,7 +34069,10 @@ Return ONLY the JSON array, nothing else."""
                 # when a real answer-key table was on the page.
                 # 2026-10-24: also retry gemini-3.5-flash-lite (separate
                 # free-tier quota bucket) if gemini-3.6-flash exhausts.
-                for _model_pass in ("gemini-3.6-flash", "gemini-3.5-flash-lite"):
+                # 2026-11-18: extended to gemini-3.5-flash and
+                # gemini-4-hydrogen (separate compute pool) as further
+                # fallback levels.
+                for _model_pass in ("gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-4-hydrogen"):
                     if result_json is not None:
                         break
                     for _gk in _gkeys[:8]:

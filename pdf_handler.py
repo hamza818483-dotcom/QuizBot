@@ -1562,87 +1562,118 @@ def _pdfs_reconcile_mcq_topics(mcqs: list, fallback: str, allowed_topics: list =
     return out
 
 
+# 2026-11-18: 4-level Gemini-only model fallback chain. Each model is a
+# separate free-tier quota bucket (and gemini-4-hydrogen a separate
+# compute pool), so exhausting one doesn't block the others -- only after
+# ALL FOUR are exhausted does the caller fall through to Groq/other
+# fallbacks.
+GEMINI_FALLBACK_MODELS = [
+    "gemini-3.6-flash",       # 1st choice (primary)
+    "gemini-3.5-flash-lite",  # 2nd choice (fast, generous free-tier quota)
+    "gemini-3.5-flash",       # 3rd choice (separate free-tier quota)
+    "gemini-4-hydrogen",      # 4th choice (separate compute pool, newest)
+]
+
+
 async def _pdfs_gemini_call_with_retry(prompt: str, img: Image.Image, log_tag: str) -> str:
     """Shared Gemini-call-with-key-rotation-retry logic used by both /pdfs
     Call1 (topic detect) and Call2 (MCQ generate) -- extracted out of the
     old single-call generate_pdfs_topic_mcqs so both calls get the same
     key-rotation, daily-exhaustion skip, and timeout/retry behavior
     without duplicating it. Returns raw response text, or "" if every key
-    failed (caller decides what empty means for its own step)."""
-    _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True)
-    _all_marked_exhausted = bool(key_rotator.keys) and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys)
-    _live = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)]
-    if _live:
-        _ordered = _live
-    elif _all_marked_exhausted:
-        # Don't blind-trust "every key exhausted" -- implausible for 40+
-        # independent keys at once, likely a bad flag. Verify with 2 real
-        # attempts before giving up to Groq/other fallbacks.
-        logger.warning(f"[{log_tag}] all {len(key_rotator.keys)} Gemini keys marked daily-exhausted (suspicious) — retrying 2 keys for real before giving up")
-        _ordered = _ordered[:2] if _ordered else []
-    # User instruction (2026-08-25): try every live key before Groq -- only
-    # stop early on a genuine backend/network outage (3 consecutive
-    # non-quota failures), never just because a key-count ceiling was hit.
-    max_retries = len(_ordered) if _ordered else 5
-    _consecutive_infra_fails = 0
-    _tried_keys = set()
-    for attempt in range(max_retries):
-        # Re-derive fresh healthy order each attempt instead of indexing a
-        # stale pre-loop snapshot, so a key cooled/banned earlier in THIS
-        # loop is never revisited while an untried healthy key exists.
-        _fresh = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True)
-        _fresh = [k for k in _fresh if not _is_gemini_key_exhausted_today(k)] or _fresh
-        _untried = [k for k in _fresh if k not in _tried_keys]
-        if _untried:
-            key = _untried[0]
-        elif _fresh:
-            key = _fresh[attempt % len(_fresh)]
-        else:
-            key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
-        _tried_keys.add(key)
-        key_rotator.record_call(key)
-        try:
-            from google import genai as gai
-            from google.genai import types
-            client = gai.Client(
-                api_key=key,
-                http_options=types.HttpOptions(timeout=38000)
-            )
-            img_b64 = image_to_base64(img)
+    on every fallback model failed (caller decides what empty means for
+    its own step).
 
-            def _call():
-                return client.models.generate_content(
-                    model="gemini-3.6-flash",
-                    contents=[
-                        types.Part.from_text(text=prompt),
-                        types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
-                    ],
-                    config=types.GenerateContentConfig(max_output_tokens=8192)
-                )
-            _attempt_timeout = 40 if attempt == 0 else 25
-            async with key_rotator.throttled_call(key=key):
-                response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=_attempt_timeout)
-            key_rotator.mark_healthy(key)
-            return response.text or ""
-        except Exception as e:
-            err_str = _gemini_full_error_text(e)
-            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
-                is_daily = "PerDay" in err_str or "generate_content_free_tier_requests" in err_str
-                key_rotator.mark_rate_limited(key, daily_exhausted=is_daily)
-                _consecutive_infra_fails = 0
-            elif ("SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper()
-                  or "UNAUTHENTICATED" in err_str.upper() or "ACCOUNT_STATE_INVALID" in err_str.upper()
-                  or "401" in err_str):
-                key_rotator.mark_banned(key, reason=err_str[:200]); key_rotator.record_account_error(key)
-                _consecutive_infra_fails = 0
+    2026-11-18: now walks GEMINI_FALLBACK_MODELS in order -- each model
+    is a separate quota bucket, so a key pool exhausted on one model is
+    retried fresh on the next before giving up entirely."""
+    for _model_idx, _model_name in enumerate(GEMINI_FALLBACK_MODELS):
+        _is_fallback = _model_idx > 0
+        _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True)
+        _all_marked_exhausted = bool(key_rotator.keys) and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys)
+        if _is_fallback:
+            # Separate quota bucket from the primary model -- the shared
+            # daily-exhausted flag (keyed by raw key only, no model) does
+            # not apply here, so use the full unfiltered key list.
+            pass
+        else:
+            _live = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)]
+            if _live:
+                _ordered = _live
+            elif _all_marked_exhausted:
+                # Don't blind-trust "every key exhausted" -- implausible for
+                # 40+ independent keys at once, likely a bad flag. Verify
+                # with 2 real attempts before giving up to the next model.
+                logger.warning(f"[{log_tag}] all {len(key_rotator.keys)} Gemini keys marked daily-exhausted (suspicious) — retrying 2 keys for real before giving up")
+                _ordered = _ordered[:2] if _ordered else []
+        # User instruction (2026-08-25): try every live key before Groq -- only
+        # stop early on a genuine backend/network outage (3 consecutive
+        # non-quota failures), never just because a key-count ceiling was hit.
+        max_retries = len(_ordered) if _ordered else 5
+        _consecutive_infra_fails = 0
+        _tried_keys = set()
+        for attempt in range(max_retries):
+            # Re-derive fresh healthy order each attempt instead of indexing a
+            # stale pre-loop snapshot, so a key cooled/banned earlier in THIS
+            # loop is never revisited while an untried healthy key exists.
+            _fresh = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True)
+            if not _is_fallback:
+                _fresh = [k for k in _fresh if not _is_gemini_key_exhausted_today(k)] or _fresh
+            _untried = [k for k in _fresh if k not in _tried_keys]
+            if _untried:
+                key = _untried[0]
+            elif _fresh:
+                key = _fresh[attempt % len(_fresh)]
             else:
-                logger.warning(f"[{log_tag}] Attempt {attempt+1} failed: {type(e).__name__}: {err_str}")
-                _consecutive_infra_fails += 1
-                key_rotator.mark_rate_limited(key, daily_exhausted=False, retry_after_seconds=30)
-            if attempt < max_retries - 1:
-                await asyncio.sleep(1)
-            continue
-    logger.warning(f"[{log_tag}] All keys failed — returning empty (caller will try Groq/other fallbacks)")
+                key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
+            _tried_keys.add(key)
+            key_rotator.record_call(key)
+            try:
+                from google import genai as gai
+                from google.genai import types
+                client = gai.Client(
+                    api_key=key,
+                    http_options=types.HttpOptions(timeout=38000)
+                )
+                img_b64 = image_to_base64(img)
+
+                def _call():
+                    return client.models.generate_content(
+                        model=_model_name,
+                        contents=[
+                            types.Part.from_text(text=prompt),
+                            types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
+                        ],
+                        config=types.GenerateContentConfig(max_output_tokens=8192)
+                    )
+                _attempt_timeout = 40 if attempt == 0 else 25
+                async with key_rotator.throttled_call(key=key):
+                    response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=_attempt_timeout)
+                key_rotator.mark_healthy(key)
+                return response.text or ""
+            except Exception as e:
+                err_str = _gemini_full_error_text(e)
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+                    is_daily = "PerDay" in err_str or "generate_content_free_tier_requests" in err_str
+                    # Don't poison the shared per-key flag with a fallback
+                    # model's own exhaustion -- it's a separate quota bucket.
+                    if not _is_fallback:
+                        key_rotator.mark_rate_limited(key, daily_exhausted=is_daily)
+                    _consecutive_infra_fails = 0
+                elif ("SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper()
+                      or "UNAUTHENTICATED" in err_str.upper() or "ACCOUNT_STATE_INVALID" in err_str.upper()
+                      or "401" in err_str):
+                    key_rotator.mark_banned(key, reason=err_str[:200]); key_rotator.record_account_error(key)
+                    _consecutive_infra_fails = 0
+                else:
+                    logger.warning(f"[{log_tag}] ({_model_name}) Attempt {attempt+1} failed: {type(e).__name__}: {err_str}")
+                    _consecutive_infra_fails += 1
+                    if not _is_fallback:
+                        key_rotator.mark_rate_limited(key, daily_exhausted=False, retry_after_seconds=30)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1)
+                continue
+        logger.warning(f"[{log_tag}] All keys failed on {_model_name}" + (" — trying next fallback model" if _model_idx < len(GEMINI_FALLBACK_MODELS) - 1 else " (last fallback) — returning empty (caller will try Groq/other fallbacks)"))
     return ""
 
 
@@ -1736,93 +1767,102 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
     )
     prompt = PDFS_CALL2_MCQ_ONLY_PROMPT.format(
         topics_list=topics_list, page=str(page).zfill(2), per_topic_count=mcq_count_hint)
-    _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True)
-    _all_marked_exhausted = bool(key_rotator.keys) and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys)
-    _live = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)]
-    if _live:
-        _ordered = _live
-    elif _all_marked_exhausted:
-        # Don't blind-trust an in-memory/D1 flag that says EVERY key is
-        # daily-exhausted -- 40+ independent keys genuinely hitting quota
-        # at the exact same moment is implausible, so this usually means
-        # the flag was set wrongly somewhere. Verify with 2 real attempts
-        # before giving up, instead of returning empty immediately.
-        logger.warning(f"[PDFS-C2] all {len(key_rotator.keys)} Gemini keys marked daily-exhausted (suspicious) — retrying 2 keys for real before giving up")
-        _ordered = _ordered[:2] if _ordered else []
-    max_retries = len(_ordered) if _ordered else 5
-    _consecutive_infra_fails = 0
-    _tried_keys = set()
-    for attempt in range(max_retries):
-        _fresh = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True)
-        _fresh = [k for k in _fresh if not _is_gemini_key_exhausted_today(k)] or _fresh
-        _untried = [k for k in _fresh if k not in _tried_keys]
-        if _untried:
-            key = _untried[0]
-        elif _fresh:
-            key = _fresh[attempt % len(_fresh)]
-        else:
-            key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
-        _tried_keys.add(key)
-        key_rotator.record_call(key)
-        try:
-            from google import genai as gai
-            from google.genai import types
-            client = gai.Client(
-                api_key=key,
-                http_options=types.HttpOptions(timeout=38000)
-            )
-            img_b64 = image_to_base64(img)
-
-            def _call():
-                return client.models.generate_content(
-                    model="gemini-3.6-flash",
-                    contents=[
-                        types.Part.from_text(text=prompt),
-                        types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
-                    ],
-                    config=types.GenerateContentConfig(max_output_tokens=8192)
-                )
-            _attempt_timeout = 40 if attempt == 0 else 25
-            async with key_rotator.throttled_call(key=key):
-                response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=_attempt_timeout)
-            valid = _parse_mcq_json(response.text)
-            elapsed = round(_time.time() - _t0, 1)
-            if not valid:
-                logger.warning(f"[PDFS-C2] Page {page}: 0 valid MCQs parsed (attempt {attempt+1})")
+    # 2026-11-18: walk GEMINI_FALLBACK_MODELS -- each model is a separate
+    # free-tier quota bucket (gemini-4-hydrogen a separate compute pool),
+    # so exhausting one doesn't block the others.
+    for _model_idx, _model_name in enumerate(GEMINI_FALLBACK_MODELS):
+        _is_fallback = _model_idx > 0
+        _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True)
+        _all_marked_exhausted = bool(key_rotator.keys) and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys)
+        if not _is_fallback:
+            _live = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)]
+            if _live:
+                _ordered = _live
+            elif _all_marked_exhausted:
+                # Don't blind-trust an in-memory/D1 flag that says EVERY key is
+                # daily-exhausted -- 40+ independent keys genuinely hitting quota
+                # at the exact same moment is implausible, so this usually means
+                # the flag was set wrongly somewhere. Verify with 2 real attempts
+                # before giving up, instead of returning empty immediately.
+                logger.warning(f"[PDFS-C2] all {len(key_rotator.keys)} Gemini keys marked daily-exhausted (suspicious) — retrying 2 keys for real before giving up")
+                _ordered = _ordered[:2] if _ordered else []
+        max_retries = len(_ordered) if _ordered else 5
+        _consecutive_infra_fails = 0
+        _tried_keys = set()
+        for attempt in range(max_retries):
+            _fresh = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True)
+            if not _is_fallback:
+                _fresh = [k for k in _fresh if not _is_gemini_key_exhausted_today(k)] or _fresh
+            _untried = [k for k in _fresh if k not in _tried_keys]
+            if _untried:
+                key = _untried[0]
+            elif _fresh:
+                key = _fresh[attempt % len(_fresh)]
             else:
-                valid = _pdfs_reconcile_mcq_topics(valid, topic, allowed_topics=_allowed_topics)
-            key_rotator.mark_healthy(key)
+                key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
+            _tried_keys.add(key)
+            key_rotator.record_call(key)
             try:
-                import app as _app_mod
-                _cid = chat_id if chat_id is not None else _app_mod._current_job_chat_id_ctx.get()
-                if _cid is None:
-                    logger.warning(f"[PDFS-C2] AI-call bump skipped: no chat_id available (page {page}) -- dashboard AI-call count will under-report")
+                from google import genai as gai
+                from google.genai import types
+                client = gai.Client(
+                    api_key=key,
+                    http_options=types.HttpOptions(timeout=38000)
+                )
+                img_b64 = image_to_base64(img)
+
+                def _call():
+                    return client.models.generate_content(
+                        model=_model_name,
+                        contents=[
+                            types.Part.from_text(text=prompt),
+                            types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
+                        ],
+                        config=types.GenerateContentConfig(max_output_tokens=8192)
+                    )
+                _attempt_timeout = 40 if attempt == 0 else 25
+                async with key_rotator.throttled_call(key=key):
+                    response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=_attempt_timeout)
+                valid = _parse_mcq_json(response.text)
+                elapsed = round(_time.time() - _t0, 1)
+                if not valid:
+                    logger.warning(f"[PDFS-C2] Page {page}: 0 valid MCQs parsed (attempt {attempt+1}, {_model_name})")
                 else:
-                    _app_mod._bump_ai_call_count(_cid, model="Gemini")
-            except Exception as _bump_e:
-                logger.warning(f"[PDFS-C2] AI-call bump failed (page {page}): {type(_bump_e).__name__}: {_bump_e}")
-            logger.info(f"[PDFS-C2] Page {page}: {len(valid)} MCQs in {elapsed}s (attempt {attempt+1}, gemini-3.6-flash)")
-            return valid, elapsed, "Gemini" if valid else None
-        except Exception as e:
-            err_str = _gemini_full_error_text(e)
-            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
-                is_daily = "PerDay" in err_str or "generate_content_free_tier_requests" in err_str
-                key_rotator.mark_rate_limited(key, daily_exhausted=is_daily)
-                _consecutive_infra_fails = 0
-            elif ("SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper()
-                  or "UNAUTHENTICATED" in err_str.upper() or "ACCOUNT_STATE_INVALID" in err_str.upper()
-                  or "401" in err_str):
-                key_rotator.mark_banned(key, reason=err_str[:200]); key_rotator.record_account_error(key)
-                _consecutive_infra_fails = 0
-            else:
-                logger.warning(f"[PDFS-C2] Attempt {attempt+1} failed: {type(e).__name__}: {err_str}")
-                _consecutive_infra_fails += 1
-                key_rotator.mark_rate_limited(key, daily_exhausted=False, retry_after_seconds=30)
-            if attempt < max_retries - 1:
-                await asyncio.sleep(1)
-            continue
-    elapsed = round(_time.time() - _t0, 1)
-    logger.warning(f"[PDFS-C2] All keys failed for page {page} after {elapsed}s")
+                    valid = _pdfs_reconcile_mcq_topics(valid, topic, allowed_topics=_allowed_topics)
+                key_rotator.mark_healthy(key)
+                try:
+                    import app as _app_mod
+                    _cid = chat_id if chat_id is not None else _app_mod._current_job_chat_id_ctx.get()
+                    if _cid is None:
+                        logger.warning(f"[PDFS-C2] AI-call bump skipped: no chat_id available (page {page}) -- dashboard AI-call count will under-report")
+                    else:
+                        _app_mod._bump_ai_call_count(_cid, model="Gemini")
+                except Exception as _bump_e:
+                    logger.warning(f"[PDFS-C2] AI-call bump failed (page {page}): {type(_bump_e).__name__}: {_bump_e}")
+                logger.info(f"[PDFS-C2] Page {page}: {len(valid)} MCQs in {elapsed}s (attempt {attempt+1}, {_model_name})")
+                return valid, elapsed, "Gemini" if valid else None
+            except Exception as e:
+                err_str = _gemini_full_error_text(e)
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+                    is_daily = "PerDay" in err_str or "generate_content_free_tier_requests" in err_str
+                    if not _is_fallback:
+                        key_rotator.mark_rate_limited(key, daily_exhausted=is_daily)
+                    _consecutive_infra_fails = 0
+                elif ("SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper()
+                      or "UNAUTHENTICATED" in err_str.upper() or "ACCOUNT_STATE_INVALID" in err_str.upper()
+                      or "401" in err_str):
+                    key_rotator.mark_banned(key, reason=err_str[:200]); key_rotator.record_account_error(key)
+                    _consecutive_infra_fails = 0
+                else:
+                    logger.warning(f"[PDFS-C2] ({_model_name}) Attempt {attempt+1} failed: {type(e).__name__}: {err_str}")
+                    _consecutive_infra_fails += 1
+                    if not _is_fallback:
+                        key_rotator.mark_rate_limited(key, daily_exhausted=False, retry_after_seconds=30)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1)
+                continue
+        elapsed = round(_time.time() - _t0, 1)
+        logger.warning(f"[PDFS-C2] All keys failed for page {page} on {_model_name} after {elapsed}s" + ("" if _model_idx < len(GEMINI_FALLBACK_MODELS) - 1 else " (last fallback)"))
     return [], elapsed, None
 
 
@@ -2575,7 +2615,11 @@ async def generate_mcq_from_image(
     # 2026-09-23: dropped gemini-2.5-flash — Google returns hard 404
     # ("no longer available to new users") on every call now, so it was
     # just burning one guaranteed-failing attempt per key for no benefit.
-    _GEMINI_MODELS = ["gemini-3.6-flash", "gemini-3.6-flash"]
+    # 2026-11-18: extended to the full 4-level GEMINI_FALLBACK_MODELS chain
+    # (3.6-flash -> 3.5-flash-lite -> 3.5-flash -> 4-hydrogen) -- each is a
+    # separate free-tier quota bucket (4-hydrogen a separate compute pool),
+    # so this key tries all four models before the outer loop moves on.
+    _GEMINI_MODELS = list(GEMINI_FALLBACK_MODELS)
 
     _tried_keys = set()
     for attempt in range(max_retries):
