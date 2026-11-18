@@ -1644,7 +1644,7 @@ class _DownloadCancelled(Exception):
     pass
 
 
-async def _pyro_parallel_download(client, media, file_size: int, progress_cb=None, concurrency: int = 16) -> bytes:
+async def _pyro_parallel_download(client, media, file_size: int, progress_cb=None, concurrency: int = 12) -> bytes:
     """Download one Telegram file with `concurrency` upload.GetFile requests
     in flight at once over a SINGLE media session.
 
