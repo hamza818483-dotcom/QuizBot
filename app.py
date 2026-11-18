@@ -10481,6 +10481,7 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
             f"📄 CSV ফাইল — {topic}\n"
             f"💎 {len(mcqs)} MCQ\n\n"
             f"📌 Format: questions, option1-5, answer(numeric), explanation, type, section"
+            f"{_model_caption_line(mcqs)}"
         )
         await send_document(
             chat_id, csv_content,
@@ -12015,6 +12016,32 @@ async def _mcqs_to_csv_bytes(mcqs: list) -> tuple:
         ])
     meta = {"underline_qnos": underline_qnos, "multi_answer_qnos": multi_answer_qnos}
     return buf.getvalue().encode("utf-8-sig"), meta
+
+
+def _model_caption_line(mcqs: list) -> str:
+    """2026-11-18 (user request): /qbm, /pdf and /img CSV captions should
+    report which AI model actually generated the MCQs. Reads the `_model`
+    tag set on each MCQ dict at generation time (pdf_handler.py's
+    generate_mcq_from_image for /pdf+/img, app.py's QBM Call1 for /qbm).
+    Falls back to the generic `_provider` tag (e.g. "Groq", "OpenRouter")
+    when no specific `_model` name was recorded, so Groq/other-fallback
+    runs still show something rather than nothing. If the MCQs came from
+    more than one model/provider (mixed fallback across pages), lists
+    each distinct one. Returns '' if nothing to report."""
+    if not mcqs:
+        return ""
+    names = []
+    seen = set()
+    for m in mcqs:
+        if not isinstance(m, dict):
+            continue
+        n = m.get("_model") or m.get("_provider")
+        if n and n not in seen:
+            seen.add(n)
+            names.append(n)
+    if not names:
+        return ""
+    return f"\n🤖 Model: {', '.join(names)}"
 
 
 def _csv_meta_caption_suffix(meta: dict) -> str:
@@ -18964,7 +18991,7 @@ async def _handle_dagano_impl(msg: dict):
             if all_mcqs_flat:
                 csv_bytes, _csv_meta = await _mcqs_to_csv_bytes(all_mcqs_flat)
                 await send_document(chat_id, csv_bytes, f"{topic}_mcq.csv",
-                    caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ{_csv_meta_caption_suffix(_csv_meta)}",
+                    caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ{_csv_meta_caption_suffix(_csv_meta)}{_model_caption_line(all_mcqs_flat)}",
                     mime_type="text/csv")
         except Exception as csv_err:
             logger.warning(f"[Dagano] CSV auto-send failed: {csv_err}")
@@ -19395,7 +19422,7 @@ async def _handle_extra_impl(msg: dict):
             if all_mcqs_flat:
                 csv_bytes, _csv_meta = await _mcqs_to_csv_bytes(all_mcqs_flat)
                 await send_document(chat_id, csv_bytes, f"{topic}_mcq.csv",
-                    caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ{_csv_meta_caption_suffix(_csv_meta)}",
+                    caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ{_csv_meta_caption_suffix(_csv_meta)}{_model_caption_line(all_mcqs_flat)}",
                     mime_type="text/csv", reply_to_message_id=status_msg_id)
             else:
                 await send_msg(chat_id, "⚠️ কোনো hand-marked MCQ পাওয়া যায়নি।",
@@ -19810,7 +19837,7 @@ async def handle_pdf(msg: dict):
                 if all_mcqs_flat:
                     csv_bytes, _csv_meta = await _mcqs_to_csv_bytes(all_mcqs_flat)
                     await send_document(chat_id, csv_bytes, f"{topic}_mcq.csv",
-                        caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ{_csv_meta_caption_suffix(_csv_meta)}",
+                        caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ{_csv_meta_caption_suffix(_csv_meta)}{_model_caption_line(all_mcqs_flat)}",
                         mime_type="text/csv")
             except Exception as csv_err:
                 logger.warning(f"[PDF] CSV auto-send failed: {csv_err}")
@@ -27107,9 +27134,20 @@ async def _qbm_call1_extract(img, careful: bool = False, gemini_only: bool = Fal
         if gem:
             logger.info(f"[QBM Call1] Gemini succeeded, {len(gem)} MCQ")
             out = _qbm_dedup_list(gem)
+            # 2026-11-18 (caption fix): tag the exact Gemini model used,
+            # read from the shared contextvar _qbm_gemini_raw just set.
+            _model_used = None
+            try:
+                from pdf_handler import _last_gemini_success_ctx
+                _info = _last_gemini_success_ctx.get()
+                _model_used = _info.get("model") if _info else None
+            except Exception:
+                pass
             for m in out:
                 m["_provider"] = "Gemini"
                 m["_call1_provider"] = "Gemini"
+                if _model_used:
+                    m.setdefault("_model", _model_used)
             return out
         if gemini_only:
             logger.warning("[QBM Call1] Gemini returned empty/failed — gemini_only set, no Groq/OpenRouter fallback")
@@ -28337,8 +28375,18 @@ async def _qbm_gemini_raw_only(img, prompt: str, careful: bool = False) -> str:
                 if _used is not None:
                     _used.add(key_rotator.account_of(key))
                 try:
-                    from pdf_handler import _gemini_key_hash
+                    from pdf_handler import _gemini_key_hash, _last_gemini_success_ctx
                     logger.info(f"[QBM Gemini] success — account={key_rotator.account_of(key)} key={_gemini_key_hash(key)}")
+                    # 2026-11-18 (caption fix): record which model actually
+                    # won this call on the same shared contextvar /pdf and
+                    # /img already use, so the CSV caption can report it
+                    # for /qbm too via one unified reader.
+                    _last_gemini_success_ctx.set({
+                        "account": key_rotator.account_of(key),
+                        "key_hash": _gemini_key_hash(key),
+                        "model": _this_model,
+                        "page": None,
+                    })
                 except Exception:
                     pass
                 return response.text or ""
@@ -30366,9 +30414,10 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
                     "text": "📋 Channel List",
                     "callback_data": f"qbmch_showlist_{uid}"
                 }]]}
+                _qbm_all_mcqs_flat = [m for _, _, mcqs in extracted_pages for m in mcqs]
                 await send_document(chat_id, _buf_qbm.getvalue().encode("utf-8"),
                     f"{topic}_QBM.csv",
-                    caption=f"📋 {topic} — {total_mcq_found} MCQ (Extracted)",
+                    caption=f"📋 {topic} — {total_mcq_found} MCQ (Extracted){_model_caption_line(_qbm_all_mcqs_flat)}",
                     mime_type="text/csv",
                     reply_markup=_csv_kb)
             return
@@ -35240,7 +35289,7 @@ async def process_qbm_pages(
             writer.writerow(row)
         await send_document(chat_id, buf.getvalue().encode("utf-8"),
             f"{topic}_QBM.csv",
-            caption=f"📋 {topic} — {len(all_mcqs_csv)} MCQ (Extracted)",
+            caption=f"📋 {topic} — {len(all_mcqs_csv)} MCQ (Extracted){_model_caption_line(all_mcqs_csv)}",
             mime_type="text/csv")
 
     if not csv_only and summary_pages:

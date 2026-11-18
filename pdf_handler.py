@@ -2878,6 +2878,13 @@ async def generate_mcq_from_image(
                         continue
                 key_rotator.mark_healthy(key)
                 _note_model_success(model_name)
+                # 2026-11-18 (caption fix): tag the exact Gemini model that
+                # produced this MCQ directly on the dict -- a contextvar
+                # alone can go stale/get overwritten by a later page's call
+                # before the CSV caption is built, but a per-MCQ tag always
+                # reflects the model that genuinely generated THIS row.
+                for _vm in valid:
+                    _vm.setdefault("_model", model_name)
                 logger.info(f"[Gemini] Page {page}: {len(valid)} MCQs (attempt {attempt+1}, model={model_name})")
                 try:
                     _last_gemini_success_ctx.set({
