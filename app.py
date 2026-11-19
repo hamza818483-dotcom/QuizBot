@@ -35497,6 +35497,30 @@ async def process_qbm_pages(
         _current_job_chat_id_ctx.set(chat_id)
         if is_cancelled(chat_id):
             clear_active_job(chat_id)
+            # 2026-11-19 (user report): cancel mid-posting used to leave
+            # all_mcqs_csv containing only the pages ALREADY posted before
+            # Cancel was hit, so the CSV sent after this break silently
+            # dropped every not-yet-posted page -- even though, when
+            # skip_extract=True, those pages' MCQs were already fully
+            # extracted in Phase 1 (qbm_extract_all_pages) and are sitting
+            # right here in page_tuples, just not posted to the channel yet.
+            # Backfill the remaining not-yet-reached pages into all_mcqs_csv
+            # now so the post-loop CSV send below covers every MCQ that was
+            # actually extracted, not just the ones posted so far.
+            if skip_extract and page_tuples:
+                _ans_map_brk = {"A": "1", "B": "2", "C": "3", "D": "4"}
+                for _p, _img, _mcqs in page_tuples[idx:]:
+                    if not _mcqs:
+                        continue
+                    for m in _mcqs:
+                        opts = m.get("options", ["", "", "", ""])
+                        all_mcqs_csv.append([m["question"], opts[0] if len(opts) > 0 else "",
+                            opts[1] if len(opts) > 1 else "",
+                            opts[2] if len(opts) > 2 else "",
+                            opts[3] if len(opts) > 3 else "",
+                            opts[4] if len(opts) > 4 else "",
+                            _ans_map_brk.get(m.get("answer", "A"), "1"),
+                            _strip_img_tag(m.get("explanation", "")), "1", "1"])
             break
         page_status[idx]["current"] = True
         await edit_msg(chat_id, status_msg_id,
