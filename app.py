@@ -28289,7 +28289,6 @@ async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = False) -> l
     batch_items = []  # collected across the whole page -> ONE Gemini call at the end
     pending_question_idx = {}  # idx in fixed -> (q, opts) for batch fallback
     pending_bbox_idx = {}
-    pending_explanation_idx = {}  # idx in fixed -> answer letter, for batch explanation fallback
 
     for mc in mcqs:
         q = (mc.get("question") or "").strip()
@@ -28313,14 +28312,14 @@ async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = False) -> l
         _qbm_balance_answer_with_options(mc)
 
         if not (mc.get("explanation") or "").strip():
-            # REVERTED 2026-11-18 (user request): the old bare "সঠিক উত্তর:
-            # A (...)" line had zero actual explanation value. Queue a real
-            # AI-written explanation instead, batched into the SAME page
-            # call as the question/bbox backfills above -- still only one
-            # extra Gemini call per page, not one per MCQ.
+            # DISABLED 2026-11-19 (user request): no AI explanation
+            # generation anywhere in /qbm, including this batch-backfill
+            # path -- deterministic bare line only, zero extra Gemini call.
             ans = mc.get("answer", "A")
-            pending_explanation_idx[len(fixed)] = ans
-            batch_items.append({"idx": len(fixed), "type": "explanation", "q": q, "opts": opts, "answer": ans})
+            opt_letters = ["A", "B", "C", "D", "E"]
+            oidx = opt_letters.index(ans) if ans in opt_letters else 0
+            ans_text = opts[oidx] if oidx < len(opts) else ""
+            mc["explanation"] = f"সঠিক উত্তর: {ans} ({ans_text})" if ans_text else f"সঠিক উত্তর: {ans}"
 
         if not mc.get("qsn_bbox") and "<img" not in mc["question"].lower() and _FIGURE_CAPTION_RE.search(mc["question"]):
             pending_bbox_idx[len(fixed)] = mc["question"]
@@ -28340,24 +28339,8 @@ async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = False) -> l
             if isinstance(r, list) and len(r) == 4:
                 fixed[idx]["qsn_bbox"] = r
                 logger.info(f"[QBM safety-net] Recovered missed diagram bbox for: {question[:50]}")
-        for idx, ans in pending_explanation_idx.items():
-            r = results.get(idx)
-            if isinstance(r, str) and r.strip():
-                fixed[idx]["explanation"] = r.strip()
-            else:
-                # Batch call failed/returned nothing for this item -- fall
-                # back to the old bare line rather than shipping no
-                # explanation at all.
-                opts = fixed[idx].get("options", [])
-                opt_letters = ["A", "B", "C", "D"]
-                oidx = opt_letters.index(ans) if ans in opt_letters else 0
-                ans_text = opts[oidx] if oidx < len(opts) else ""
-                fixed[idx]["explanation"] = f"সঠিক উত্তর: {ans} ({ans_text})" if ans_text else f"সঠিক উত্তর: {ans}"
-    else:
-        # No batch_items at all means pending_explanation_idx is also empty
-        # (both are only populated together in this loop), so nothing left
-        # to backfill here.
-        pass
+    # explanation backfill no longer queued into batch_items (disabled
+    # above) -- it is filled synchronously in the loop before this point.
 
     fixed = await _attach_option_images_if_missing(fixed, img)
     return fixed
@@ -29977,39 +29960,21 @@ Line 3: the 165-char-max Bengali explanation (omit this line entirely if Line 2 
 
 async def _qbm_build_explanation_for_known_answer(mc: dict, answer_letter: str, gemini_only: bool = False) -> str:
     """
-    Builds a clean, question-related, step-by-step Bengali explanation
-    when the correct answer is already known (e.g. matched from an
-    answer-key on a nearby page) but no real explanation text came with
-    it. Main line (why the correct option is right) capped at ~200 chars,
-    then one line per wrong option -- each on its own line (\\n-separated).
-    NEVER references the source, page, or how the answer was found.
-
-    gemini_only (default False): when True (/unmesh, per user request
-    2026-09-04), uses Gemini's text-only call instead of Groq -- no non-
-    Gemini model anywhere in /unmesh's pipeline.
+    DISABLED (2026-11-19, per user request): explanation generation must
+    never run for /qbm or any derived command -- no extra Gemini/Groq call,
+    zero generation cost/latency/hallucination risk. Returns a bare
+    deterministic "সঠিক উত্তর: X (...)" line built only from data already
+    in `mc`/`answer_letter`, same as the pre-df6312b behavior. This is
+    intentionally NOT a prompt-level change (mirrors the main extraction
+    prompt's "EXPLANATION: not produced in this call" rule at the
+    code/backfill level too), so no caller of this function can
+    accidentally re-introduce a generated explanation.
     """
-    try:
-        q = mc.get("question", "")
-        opts = mc.get("options", [])
-        opts_txt = "\n".join(f"{L}) {o}" for L, o in zip("ABCDE", opts))
-        prompt = f"""প্রশ্ন: {q}
-{opts_txt}
-সঠিক উত্তর: {answer_letter}
-
-Write a Bengali explanation in STEP-BY-STEP format, each step on its own separate line (use actual newlines, not one paragraph):
-
-IF this is a MATH/NUMERICAL/CALCULATION question: show the WORKED SOLUTION step-by-step (given values -> formula -> substitution -> result), one step per line, ending with the final answer matching option {answer_letter}. Do not skip steps.
-
-IF this is a CONCEPTUAL/FACTUAL question:
-Line 1 (MAIN line, max ~200 characters): why the correct option ({answer_letter}) is right, plain direct fact like a textbook.
-Line 2 onward (one line per WRONG option, in order): briefly what that option actually is/means and why it's wrong here, specific fact each time -- never a bare "ভুল" with no reason.
-
-NEVER mention the source, page, answer key, or how the answer was determined. Output ONLY the explanation text (with real line breaks), nothing else."""
-        txt = (await (_ai_gemini_text_call(prompt, gemini_only=True) if gemini_only else _qbm_groq_text_call(prompt))).strip()
-        return txt[:800]
-    except Exception as e:
-        logger.warning(f"[QBM] Explanation build failed: {e}")
-        return ""
+    opts = mc.get("options", [])
+    opt_letters = ["A", "B", "C", "D", "E"]
+    idx = opt_letters.index(answer_letter) if answer_letter in opt_letters else 0
+    ans_text = opts[idx] if idx < len(opts) else ""
+    return f"সঠিক উত্তর: {answer_letter} ({ans_text})" if ans_text else f"সঠিক উত্তর: {answer_letter}"
 
 
 async def handle_auto_command(msg: dict):
