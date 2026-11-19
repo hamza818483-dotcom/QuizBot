@@ -28357,6 +28357,13 @@ async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = False) -> l
 # unparseable output; a valid "[]" means a genuinely empty page.
 # ============================================================
 _v_stage_cb_ctx = contextvars.ContextVar("v_stage_cb", default=None)
+# 2026-11-19 (user request): if a single /qbm page is stuck for 2 minutes
+# (API hang/dead key/etc.), instead of giving up on that page, retry it
+# forcing gemini-3.5-flash-lite (separate quota bucket, usually fast/free
+# when gemini-3.6-flash is the one hanging) rather than skipping straight
+# to abandonment. Set around the retry call only; _qbm_gemini_raw's very
+# first (non-recursive) call checks this to pick its starting model.
+_qbm_forced_start_model_ctx = contextvars.ContextVar("qbm_forced_start_model", default=None)
 
 
 def _v_stage(text: str) -> None:
@@ -28720,6 +28727,12 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
         # cooldown from an earlier page's 3-in-a-row outage, skip straight
         # to the first model that ISN'T in cooldown instead of re-proving
         # the same overload one key at a time.
+        if _fallback_model is None and _qbm_forced_start_model_ctx.get() is not None:
+            # 2-min page-stall retry forcing a specific starting model
+            # (see _qbm_forced_start_model_ctx comment above) -- only
+            # applies to the outermost (non-recursive) call for this page,
+            # never overrides an already-in-progress fallback chain.
+            _fallback_model = _qbm_forced_start_model_ctx.get()
         _this_model = _fallback_model if _fallback_model is not None else "gemini-3.6-flash"
         if _model_in_cooldown(_this_model):
             _skip_to = _first_available_model()
@@ -29161,6 +29174,12 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
         # 2026-11-18: 5-min circuit breaker -- skip straight to a model
         # that isn't already in cooldown from an earlier call's 3-in-a-row
         # backend outage, instead of re-proving the same overload here.
+        if _fallback_model is None and _qbm_forced_start_model_ctx.get() is not None:
+            # 2-min page-stall retry forcing a specific starting model
+            # (see _qbm_forced_start_model_ctx comment above) -- only
+            # applies to the outermost (non-recursive) call for this page,
+            # never overrides an already-in-progress fallback chain.
+            _fallback_model = _qbm_forced_start_model_ctx.get()
         _this_model = _fallback_model if _fallback_model is not None else "gemini-3.6-flash"
         if _model_in_cooldown(_this_model):
             _skip_to = _first_available_model()
@@ -35054,23 +35073,55 @@ async def qbm_extract_all_pages(
             try:
                 # PAGE-STALL GUARD: one page must never block the whole job
                 # forever -- if a single page's extraction (API hang/dead
-                # key/etc.) exceeds 120s (2 min), abandon that page and move
-                # on so the rest of the pages still get processed.
+                # key/etc.) exceeds 120s (2 min), abandon the current model
+                # and retry that SAME page once forcing gemini-3.5-flash-lite
+                # (separate quota bucket, usually unaffected when
+                # gemini-3.6-flash is the one hanging) instead of giving up
+                # outright (user request 2026-11-19).
                 mcqs = await asyncio.wait_for(ex_task, timeout=120)
             except asyncio.CancelledError:
                 mcqs = []
             except asyncio.TimeoutError:
-                logger.warning(f"[QBM] page {page_num} timed out after 120s — skipping, moving to next page")
+                logger.warning(f"[QBM] page {page_num} timed out after 120s on primary model — retrying with gemini-3.5-flash-lite")
                 ex_task.cancel()
                 try:
                     await ex_task
                 except Exception:
                     pass
-                mcqs = []
                 try:
-                    await send_msg(chat_id, f"⏱️ Page {page_num}: 2 minute-এও শেষ হয়নি (API hang/dead key সম্ভবত) — skip করে পরের page-এ যাচ্ছি।")
+                    await send_msg(chat_id, f"⏱️ Page {page_num}: 2 minute-এও শেষ হয়নি — gemini-3.5-flash-lite দিয়ে আবার চেষ্টা করছি।")
                 except Exception:
                     pass
+                _tok = _qbm_forced_start_model_ctx.set("gemini-3.5-flash-lite")
+                try:
+                    retry_task = _spawn_task(_run_extract())
+                    retry_watcher = _spawn_task(_watch_cancel_inner(retry_task))
+                    try:
+                        mcqs = await asyncio.wait_for(retry_task, timeout=120)
+                    except asyncio.CancelledError:
+                        mcqs = []
+                    except asyncio.TimeoutError:
+                        # flash-lite also stalled out -- now actually give up
+                        # on this page rather than blocking the job forever.
+                        logger.warning(f"[QBM] page {page_num} ALSO timed out after 120s on gemini-3.5-flash-lite — skipping, moving to next page")
+                        retry_task.cancel()
+                        try:
+                            await retry_task
+                        except Exception:
+                            pass
+                        mcqs = []
+                        try:
+                            await send_msg(chat_id, f"⏱️ Page {page_num}: flash-lite-তেও শেষ হয়নি (দুটো মডেলই hang) — skip করে পরের page-এ যাচ্ছি।")
+                        except Exception:
+                            pass
+                    finally:
+                        retry_watcher.cancel()
+                        try:
+                            await retry_watcher
+                        except asyncio.CancelledError:
+                            pass
+                finally:
+                    _qbm_forced_start_model_ctx.reset(_tok)
             finally:
                 watcher.cancel()
                 try:
