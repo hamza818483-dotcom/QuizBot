@@ -35420,6 +35420,19 @@ async def qbm_extract_all_pages(
             except Exception:
                 pass
 
+    # 2026-11-19 (user report): cancelling mid-extraction (while pages are
+    # still processing in WINDOW-sized parallel chunks above) left results
+    # for every not-yet-started page as the raw `None` placeholder from
+    # `results = [None] * len(pages)` -- never overwritten, since the
+    # for-loop `break`s on cancel before reaching those chunks. Every
+    # caller (handle_qbm's cancel-CSV path included) unpacks this as
+    # `(page_num, img, mcqs)`, so a lingering None raised a TypeError that
+    # was swallowed by the outer except-block as a generic error, losing
+    # the whole response (no CSV, no message) even though the pages that
+    # DID finish extracting were sitting right here in the list. Drop the
+    # unprocessed-page placeholders before returning so every caller only
+    # ever sees genuine, fully-extracted (page_num, img, mcqs) tuples.
+    final_results = [r for r in final_results if r is not None]
     return final_results
 
 
