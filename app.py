@@ -27810,13 +27810,37 @@ def _qbm_is_duplicate(norm_q: str, existing_keys: list, threshold: float = 0.93)
 
 
 def _qbm_dedup_list(mcqs: list) -> list:
-    """Fuzzy-dedup a list in place order, dropping duplicate/ghost MCQs.
-    An MCQ with a genuinely empty question (extraction glitch, not a real
-    duplicate) used to be silently discarded with zero trace -- now logged
-    so an empty-question drop is visible instead of an invisible miss."""
-    # DISABLED: dedup logic inactivated to stop MCQs being dropped as
-    # false-positive duplicates (root cause of /unmesh misses). No-op passthrough.
-    return list(mcqs)
+    """EXACT-duplicate-only dedup (2026-11-19): drops an MCQ only when both
+    its normalized question text AND its full option set are identical
+    (case/whitespace-insensitive) to one already kept. Matches the same
+    strict exact-match policy as _dedupe_mcqs (44790fb) -- no near-duplicate/
+    overlap/fuzzy heuristic, since that is what caused the false-positive
+    drops (root cause of /unmesh misses) that got this disabled before.
+    A question repeated with different options, or options repeated under
+    a different question, is NOT considered a duplicate and is kept.
+    """
+    seen = set()
+    out = []
+    for m in (mcqs or []):
+        q = _qbm_normalize_q(m.get("question", ""))
+        if not q:
+            logger.warning("[QBM-dedup] dropping MCQ with empty question (extraction glitch, not a duplicate)")
+            continue
+        opts = []
+        for i in range(1, 6):
+            o = m.get(f"option{i}") or m.get(f"option_{i}") or ""
+            if o:
+                opts.append(_qbm_normalize_q(str(o)))
+        if not opts:
+            opts = tuple(sorted(_qbm_normalize_q(str(o)) for o in (m.get("options") or [])))
+        else:
+            opts = tuple(opts)
+        key = (q, opts)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(m)
+    return out
 
 
 # v-RAM-fix: caps how many pages (across ALL users) run the 3-call extraction
