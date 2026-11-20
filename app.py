@@ -31691,6 +31691,12 @@ async def _handle_rqb_impl(msg: dict):
                 page_range_text = "N/A"
             _num, _bn_name = _split_topic_number_and_bangla_name(name)
             _num_prefix = f"{_html_escape(_num)} " if _num else ""
+            # 2026-11-21 (user report): long gap seen between "RQB Extraction
+            # Complete!" message and the CSV actually arriving -- timing this
+            # call so logs show whether the delay is inside send_document
+            # (network/CF) or before this line (CSV-build loop, pure
+            # in-memory, should be instant).
+            _rqb_sd_t0 = time.monotonic()
             await send_document(chat_id, buf.getvalue().encode("utf-8"),
                 f"{safe_name}.csv",
                 caption=(f"📂 {_num_prefix}<code>{_html_escape(_bn_name)}</code>\n"
@@ -31699,6 +31705,7 @@ async def _handle_rqb_impl(msg: dict):
                          f"💎 Total: {len(mcqs)}"),
                 mime_type="text/csv",
                 reply_to_message_id=_cmd_msg_id)
+            logger.info(f"[RQB] topic CSV '{safe_name}' send_document took {time.monotonic()-_rqb_sd_t0:.1f}s")
 
         if len(topic_groups) > 1:
             _merged_file_base = re.sub(r'[\\/:*?"<>|]', '_', file_name.rsplit(".", 1)[0]).strip() or "Topic"
