@@ -651,12 +651,40 @@ async function handleTgProxy(request, url) {
     const token = globalThis.ATLAS_BOT_TOKEN;
     const body = await request.text();
     const contentType = request.headers.get('content-type') || 'application/json';
-    const resp = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-      method: 'POST',
-      headers: { 'Content-Type': contentType },
-      body: body,
-      signal: AbortSignal.timeout(15000)
-    });
+    // NOTE (2026-11-21): api.telegram.org was timing out specifically from
+    // Cloudflare's network (confirmed: same timeout from user's own phone/ISP
+    // too, with and without VPN, across two different bot tokens — but a
+    // bot hosted on Render worked fine). This looks like a routing/peering
+    // issue to Telegram's primary IP rather than a Telegram-wide outage.
+    // Try the request with Cloudflare's own DNS resolution first; if that
+    // times out, retry once forcing a direct connection to Telegram's
+    // secondary IP range (149.154.167.0/24) in case the primary range
+    // (149.154.166.0/24) is the one with the bad route.
+    async function tgFetch(ipOverride) {
+      const fetchUrl = ipOverride
+        ? `https://api.telegram.org/bot${token}/${method}`
+        : `https://api.telegram.org/bot${token}/${method}`;
+      const opts = {
+        method: 'POST',
+        headers: { 'Content-Type': contentType },
+        body: body,
+        signal: AbortSignal.timeout(12000)
+      };
+      if (ipOverride) {
+        opts.cf = { resolveOverride: ipOverride };
+      }
+      return await fetch(fetchUrl, opts);
+    }
+
+    let resp;
+    try {
+      resp = await tgFetch(null);
+    } catch (e1) {
+      if (e1.name !== 'TimeoutError' && e1.name !== 'AbortError') throw e1;
+      // Primary attempt timed out — retry once against Telegram's
+      // secondary IP range before giving up.
+      resp = await tgFetch('149.154.167.220');
+    }
     const result = await resp.text();
     return new Response(result, {
       status: resp.status,
@@ -664,7 +692,7 @@ async function handleTgProxy(request, url) {
     });
   } catch (e) {
     const isTimeout = e.name === 'TimeoutError' || e.name === 'AbortError';
-    return jsonResp({ ok: false, error: (isTimeout ? 'Telegram API timeout: ' : '') + e.message }, isTimeout ? 504 : 500);
+    return jsonResp({ ok: false, error: (isTimeout ? 'Telegram API timeout (both primary and fallback IP failed): ' : '') + e.message }, isTimeout ? 504 : 500);
   }
 }
 
