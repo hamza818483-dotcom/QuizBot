@@ -30931,7 +30931,21 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
                     caption=f"🛑 Cancel করা হয়েছে — ততক্ষণে extract হওয়া {total_mcq_found} MCQ CSV আকারে পাঠানো হলো।",
                     mime_type="text/csv")
             else:
-                await send_msg(chat_id, "✅Cancelled", reply_to_message_id=status_msg_id)
+                # 2026-11-21 (user report): a bare "✅Cancelled" with no
+                # explanation looked like the CSV-on-cancel feature above
+                # was broken/not firing. Root cause: Cancel is instant --
+                # the page actively extracting when Cancel is pressed gets
+                # hard-cancelled mid-flight (per-page _watch_cancel_inner),
+                # so that page's MCQs (even if the model call was almost
+                # done) are discarded, not partially saved. If NO earlier
+                # page had already fully finished, total_mcq_found is 0 and
+                # there's genuinely nothing to put in a CSV. Make that
+                # explicit instead of a silent-looking "✅Cancelled".
+                await send_msg(chat_id,
+                    "✅ Cancel করা হয়েছে — তখনো কোনো page সম্পূর্ণ extract হয়নি "
+                    "(cancel করলে চলমান page-এর কাজ সাথে সাথে বাতিল হয়ে যায়), "
+                    "তাই পাঠানোর মতো কোনো CSV নেই।",
+                    reply_to_message_id=status_msg_id)
             return
 
         if not channel_id:
