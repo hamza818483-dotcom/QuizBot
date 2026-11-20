@@ -1314,7 +1314,8 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
                 result = _parse_cf_resp(r, "CF primary (no-reply retry)")
                 if result.get("ok"): return result
         except Exception as e:
-            logger.warning(f"[sendDoc] CF failed: {e}")
+            _e_desc = f"{type(e).__name__}: {e}" if str(e) else f"{type(e).__name__} (no message)"
+            logger.warning(f"[sendDoc] CF failed: {_e_desc}")
 
     # ── Secondary: alt CF Worker domain (HF blocks direct api.telegram.org
     #    outbound, so on that platform this is the ONLY real fallback —
@@ -1334,7 +1335,8 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
                 result = _parse_cf_resp(r, "CF secondary (no-reply retry)")
                 if result.get("ok"): return result
         except Exception as e:
-            logger.warning(f"[sendDoc] CF secondary failed: {e}")
+            _e_desc = f"{type(e).__name__}: {e}" if str(e) else f"{type(e).__name__} (no message)"
+            logger.warning(f"[sendDoc] CF secondary failed: {_e_desc}")
 
     # ── Last resort: direct TG API multipart (works on Render; on HF this
     #    will also fail since outbound api.telegram.org is blocked there,
