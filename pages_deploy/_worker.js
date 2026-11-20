@@ -645,60 +645,30 @@ async function d1Del(request) {
 // TG API PROXY
 // ============================================================
 async function handleTgProxy(request, url) {
+  // 2026-11-21: reverted to the pre-regression version (no AbortSignal
+  // timeout, no secondary-IP retry). The timeout/retry logic added after
+  // 1:37 AM was meant to handle a slow Cloudflare->Telegram route, but kept
+  // cutting off requests that were slow-but-would-have-succeeded, turning
+  // working (if slow) sends into hard failures. Plain fetch with no
+  // timeout -- same as before 1:37 AM -- restores the working behavior.
   try {
     const method = url.pathname.replace('/tg-proxy/', '');
     if (!method) return jsonResp({ ok: false, error: 'No method' });
     const token = globalThis.ATLAS_BOT_TOKEN;
     const body = await request.text();
     const contentType = request.headers.get('content-type') || 'application/json';
-    // NOTE (2026-11-21): api.telegram.org was timing out specifically from
-    // Cloudflare's network (confirmed: same timeout from user's own phone/ISP
-    // too, with and without VPN, across two different bot tokens — but a
-    // bot hosted on Render worked fine). This looks like a routing/peering
-    // issue to Telegram's primary IP rather than a Telegram-wide outage.
-    // Try the request with Cloudflare's own DNS resolution first; if that
-    // times out, retry once forcing a direct connection to Telegram's
-    // secondary IP range (149.154.167.0/24) in case the primary range
-    // (149.154.166.0/24) is the one with the bad route.
-    // 2026-11-21 (regression found): the timeout here was originally 15s,
-    // then tightened to 12s -- but the routing issue is often just SLOW
-    // (not dead), so requests that would have eventually succeeded were
-    // being aborted before completion, turning a slow-but-working call into
-    // a hard failure. Raised to 25s per attempt so a genuinely slow (but
-    // alive) route still gets a chance to finish instead of being cut off.
-    async function tgFetch(ipOverride) {
-      const fetchUrl = ipOverride
-        ? `https://api.telegram.org/bot${token}/${method}`
-        : `https://api.telegram.org/bot${token}/${method}`;
-      const opts = {
-        method: 'POST',
-        headers: { 'Content-Type': contentType },
-        body: body,
-        signal: AbortSignal.timeout(25000)
-      };
-      if (ipOverride) {
-        opts.cf = { resolveOverride: ipOverride };
-      }
-      return await fetch(fetchUrl, opts);
-    }
-
-    let resp;
-    try {
-      resp = await tgFetch(null);
-    } catch (e1) {
-      if (e1.name !== 'TimeoutError' && e1.name !== 'AbortError') throw e1;
-      // Primary attempt timed out — retry once against Telegram's
-      // secondary IP range before giving up.
-      resp = await tgFetch('149.154.167.220');
-    }
+    const resp = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+      method: 'POST',
+      headers: { 'Content-Type': contentType },
+      body: body
+    });
     const result = await resp.text();
     return new Response(result, {
       status: resp.status,
       headers: { 'Content-Type': 'application/json' }
     });
   } catch (e) {
-    const isTimeout = e.name === 'TimeoutError' || e.name === 'AbortError';
-    return jsonResp({ ok: false, error: (isTimeout ? 'Telegram API timeout (both primary and fallback IP failed): ' : '') + e.message }, isTimeout ? 504 : 500);
+    return jsonResp({ ok: false, error: e.message }, 500);
   }
 }
 
@@ -785,34 +755,6 @@ async function handleTgSendDoc(request) {
     const filename = body.filename || 'file';
     const isAscii = /^[\x00-\x7F]*$/.test(filename);
 
-    // 2026-11-21: same primary-IP-range routing issue as handleTgProxy
-    // (149.154.166.x intermittently unreachable from Cloudflare's network)
-    // was hitting document sends too, but this handler had NO timeout and
-    // NO secondary-IP fallback -- so a bad route here just hung until the
-    // Python-side client timeout (15s for small files, see core.py), which
-    // then logged an empty-message error and fell through to a dead direct
-    // path (api.telegram.org unreachable from HF). Wrap the actual TG call
-    // in the same timeout+retry pattern used for tg-proxy.
-    // 2026-11-21: same 25s reasoning as handleTgProxy above -- a too-tight
-    // timeout turns a slow-but-eventually-successful route into a hard
-    // failure. Document uploads also carry more bytes than a plain API
-    // call, so they need at least as much headroom.
-    async function sendDocToTelegram(fetchUrl, opts, ipOverride) {
-      const finalOpts = { ...opts, signal: AbortSignal.timeout(25000) };
-      if (ipOverride) finalOpts.cf = { resolveOverride: ipOverride };
-      return await fetch(fetchUrl, finalOpts);
-    }
-    async function sendDocWithRetry(fetchUrl, opts) {
-      try {
-        return await sendDocToTelegram(fetchUrl, opts, null);
-      } catch (e1) {
-        if (e1.name !== 'TimeoutError' && e1.name !== 'AbortError') throw e1;
-        // Primary route timed out -- retry once against Telegram's
-        // secondary IP range before giving up (mirrors handleTgProxy).
-        return await sendDocToTelegram(fetchUrl, opts, '149.154.167.220');
-      }
-    }
-
     let resp;
     if (isAscii) {
       // Plain ASCII filename (e.g. English PDF names) — the built-in
@@ -824,7 +766,7 @@ async function handleTgSendDoc(request) {
       formData.append('document', new Blob([bytes], { type: body.mime_type || 'application/octet-stream' }), filename);
       if (body.reply_to_message_id) formData.append('reply_to_message_id', String(body.reply_to_message_id));
       if (body.message_thread_id) formData.append('message_thread_id', String(body.message_thread_id));
-      resp = await sendDocWithRetry(`https://api.telegram.org/bot${token}/sendDocument`, { method: 'POST', body: formData });
+      resp = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, { method: 'POST', body: formData });
     } else {
       // Non-ASCII filename (Bengali/etc) — CONFIRMED: Telegram Bot API does
       // NOT honor filename*=UTF-8''... (shows the ASCII fallback instead).
@@ -879,7 +821,7 @@ async function handleTgSendDoc(request) {
       let offset = 0;
       for (const p of parts) { fullBody.set(p, offset); offset += p.length; }
 
-      resp = await sendDocWithRetry(`https://api.telegram.org/bot${token}/sendDocument`, {
+      resp = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {
         method: 'POST',
         headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
         body: fullBody,
@@ -891,8 +833,7 @@ async function handleTgSendDoc(request) {
       status: resp.status, headers: { 'Content-Type': 'application/json' }
     });
   } catch (e) {
-    const isTimeout = e.name === 'TimeoutError' || e.name === 'AbortError';
-    return jsonResp({ ok: false, error: (isTimeout ? 'Telegram API timeout (both primary and fallback IP failed): ' : '') + e.message }, isTimeout ? 504 : 500);
+    return jsonResp({ ok: false, error: e.message }, 500);
   }
 }
 
