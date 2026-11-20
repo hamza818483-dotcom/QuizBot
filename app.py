@@ -20471,8 +20471,28 @@ async def pdf_generate_all_pages(
                 pass
             _tok = _qbm_forced_start_model_ctx.set("gemini-3.5-flash-lite")
             try:
+                # BUG FIX (2026-11-20, user report: 9 min / only 2 Gemini
+                # requests total): _primary_task.cancel() above can NOT
+                # actually stop the real network call -- it runs inside
+                # asyncio.to_thread(_call_gemini), a blocking SDK call in a
+                # background thread that asyncio cancellation cannot touch.
+                # That orphaned thread keeps running (and keeps holding its
+                # throttled_call() account/global/distinct-account slot,
+                # only released in _ThrottleGuard.__aexit__ once the thread
+                # itself finally returns) for up to its own SDK-level
+                # timeout. Retrying with key_offset=slot (the SAME offset,
+                # so ordered_keys() picks the SAME first account) sent the
+                # retry straight into acquire_account_slot_blocking() /
+                # the global semaphore, queued behind that still-running
+                # orphaned call -- with its own 90s-per-wait internal
+                # timeout, this silently ate the entire 120s retry window
+                # (and could chain further) with zero new generateContent
+                # calls, exactly matching the logs. Offsetting the retry's
+                # key_offset moves it to a different account/key so it
+                # never contends for the slot the orphaned thread is still
+                # holding.
                 _retry_task = asyncio.ensure_future(
-                    generate_mcq_from_image(img, topic, page_num, mcq_count, key_offset=slot)
+                    generate_mcq_from_image(img, topic, page_num, mcq_count, key_offset=slot + 1)
                 )
                 try:
                     mcqs = await asyncio.wait_for(_retry_task, timeout=120)
