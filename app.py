@@ -30672,6 +30672,7 @@ async def handle_qbm(msg: dict, mode_v: bool = False):
             return await _handle_qbm_impl(msg, mode_v=mode_v)
         finally:
             _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
+            _qbm_track_job_end(chat_id=chat_id)
             # FIX 2026-11-02: RAMGuard logs showed a "clean self-restart"
             # firing seconds AFTER a /qbm job finished (count back to 0,
             # RSS still 322MB >= 315MB threshold) -- the decoded page
@@ -30770,6 +30771,8 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
     status_r = await send_msg(chat_id, ("✅ Cached PDF ব্যবহার হচ্ছে...\n📄 " + file_name) if _is_cache_hit else
         ("⏳ " + ("Image" if is_image_reply else "PDF") + f" download হচ্ছে...\n📄 {file_name}\n[░░░░░░░░░░ 0%]"))
     status_msg_id = status_r.get("result", {}).get("message_id")
+    if status_msg_id:
+        _qbm_track_job_start(chat_id, status_msg_id, file_name)
     # 2026-11-18 (user request): Cancel button on every file-download
     # progress message -- added via a follow-up edit_msg since the
     # button's callback_data needs status_msg_id, which only exists
@@ -42691,6 +42694,81 @@ async def _memory_cleanup_task() -> None:
 
 _active_jobs = {"count": 0}
 
+# 2026-11-20 (user request / root-cause fix): /qbm's live dashboard message
+# was found frozen for 30+ min ("stuck at 2 requests") on a page that had
+# genuinely stalled -- traced to RAMGuard's os._exit(0) (hard process kill,
+# no cleanup, no finally-blocks) firing mid-job. The in-flight job's own
+# code (stall-guard, model-switch retry, etc.) never gets a chance to run
+# because the whole process is gone -- Render boots a fresh process, but
+# the OLD dashboard message is never touched again, so it sits there
+# looking "stuck" forever even though nothing is actually running anymore.
+# This on-disk tracker records (chat_id, msg_id, file_name, started_at) for
+# every live /qbm dashboard message; on next startup, any entry still
+# present (i.e. the job never reached its own cleanup to remove it) means
+# the process died mid-job, so that stale message gets edited with an
+# explicit "process restarted, please re-run" notice instead of being left
+# frozen with no explanation.
+_QBM_JOB_TRACKER_PATH = "/tmp/qbm_active_jobs.json"
+
+def _qbm_track_job_start(chat_id: int, msg_id: int, file_name: str):
+    try:
+        data = {}
+        if os.path.isfile(_QBM_JOB_TRACKER_PATH):
+            with open(_QBM_JOB_TRACKER_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f) or {}
+        data[str(msg_id)] = {"chat_id": chat_id, "file_name": file_name, "started_at": time.time()}
+        with open(_QBM_JOB_TRACKER_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception as e:
+        logger.warning(f"[QBM-tracker] failed to record job start: {e}")
+
+def _qbm_track_job_end(msg_id: int = None, chat_id: int = None):
+    """Pass msg_id when known (preferred, exact). Falls back to clearing
+    every entry for chat_id when msg_id isn't available at the call site
+    (handle_qbm's outer finally doesn't have it in scope) -- a chat only
+    ever has one /qbm job active at a time (per-user lock), so this is
+    still precise in practice."""
+    try:
+        if not os.path.isfile(_QBM_JOB_TRACKER_PATH):
+            return
+        with open(_QBM_JOB_TRACKER_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+        if msg_id is not None:
+            data.pop(str(msg_id), None)
+        elif chat_id is not None:
+            data = {k: v for k, v in data.items() if v.get("chat_id") != chat_id}
+        with open(_QBM_JOB_TRACKER_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception as e:
+        logger.warning(f"[QBM-tracker] failed to clear job end: {e}")
+
+async def _qbm_reconcile_stale_jobs_on_startup():
+    """Called once from the startup event -- edits any /qbm dashboard
+    message left behind by a process that died mid-job (see tracker
+    comment above), so the user isn't staring at a frozen dashboard with
+    no explanation, forever."""
+    try:
+        if not os.path.isfile(_QBM_JOB_TRACKER_PATH):
+            return
+        with open(_QBM_JOB_TRACKER_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+        if not data:
+            return
+        logger.warning(f"[QBM-tracker] {len(data)} stale /qbm job(s) found from before restart -- notifying")
+        for msg_id_str, info in data.items():
+            try:
+                await tg_post("editMessageText", {
+                    "chat_id": info["chat_id"], "message_id": int(msg_id_str),
+                    "text": (f"⚠️ <b>Process restart হয়েছিল</b> — এই /qbm job (📄 {info.get('file_name', '?')}) "
+                             f"মাঝপথে বন্ধ হয়ে গেছে।\nদয়া করে আবার /qbm চালান।"),
+                    "parse_mode": "HTML",
+                })
+            except Exception as e:
+                logger.warning(f"[QBM-tracker] failed to edit stale msg {msg_id_str}: {e}")
+        os.remove(_QBM_JOB_TRACKER_PATH)
+    except Exception as e:
+        logger.warning(f"[QBM-tracker] reconcile failed: {e}")
+
 async def _ram_guard_task() -> None:
     """Proactive RSS watchdog. Was tuned for 512MB Render free tier; now on
     16GB HF Space, threshold raised proportionally so restarts only trigger
@@ -43064,6 +43142,14 @@ async def startup():
 
     from core import _install_asyncio_exception_handler
     _install_asyncio_exception_handler()  # now the real (uvicorn) loop is running
+
+    # 2026-11-20: notify any /qbm dashboard left frozen by a process that
+    # died mid-job (RAMGuard os._exit(0), crash, manual restart, etc.) --
+    # see _qbm_track_job_start/_qbm_reconcile_stale_jobs_on_startup comment.
+    try:
+        await _qbm_reconcile_stale_jobs_on_startup()
+    except Exception as e:
+        logger.warning(f"[QBM-tracker] startup reconcile call failed: {e}")
 
     # SECURITY GUARD: warn loudly (never crash -- a crash-on-detect here
     # would itself be a DoS vector if triggered by a false positive) if a
