@@ -20167,6 +20167,7 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
             lines.append(f"⏳ Page {fmt_page(s['page'])}: {_stage} ⏱{_live_secs}s{_calls_now_str}")
         else:
             lines.append(f"⬜ Page {fmt_page(s['page'])}: Waiting")
+        lines.append("┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄")
     lines += [
         "━━━━━━━━━━━━━━━━━━━━━━",
         f"📊 Progress: {pct}% [{bar}]",
