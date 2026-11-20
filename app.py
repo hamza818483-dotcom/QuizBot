@@ -35613,20 +35613,59 @@ async def qbm_extract_all_pages(
                     except asyncio.CancelledError:
                         mcqs = []
                     except asyncio.TimeoutError:
-                        # flash-lite also stalled out -- now actually give up
-                        # on this page rather than blocking the job forever.
-                        logger.warning(f"[QBM] page {page_num} ALSO timed out after 120s on gemini-3.5-flash-lite — skipping, moving to next page")
+                        # flash-lite also stalled out -- 2026-11-21 (user
+                        # request): don't give up yet, give gemini-3.6-flash
+                        # one more try (90s) before finally skipping the page
+                        # (primary 60s + flash-lite 120s + primary-retry 90s =
+                        # 4.5 min max per page).
+                        logger.warning(f"[QBM] page {page_num} ALSO timed out after 120s on gemini-3.5-flash-lite — retrying gemini-3.6-flash once more")
                         retry_task.cancel()
                         try:
                             await retry_task
                         except Exception:
                             pass
-                        mcqs = []
-                        page_status[idx]["switched_model"] = False
                         try:
-                            await send_msg(chat_id, f"⏱️ Page {page_num}: flash-lite-তেও শেষ হয়নি (দুটো মডেলই hang) — skip করে পরের page-এ যাচ্ছি।")
-                        except Exception:
-                            pass
+                            await send_msg(chat_id, f"⏱️ Page {page_num}: flash-lite-তেও শেষ হয়নি — আবার gemini-3.6-flash দিয়ে শেষবার চেষ্টা করছি।")
+                        except Exception as _e:
+                            logger.warning(f"[QBM] second stall-switch DM notice send_msg failed for page {page_num}: {_e}")
+                        page_status[idx]["stage"] = "🔁 flash-lite stall — gemini-3.6-flash দিয়ে শেষবার retry হচ্ছে..."
+                        page_status[idx]["v_now"] = "🔁 flash-lite stall — gemini-3.6-flash দিয়ে শেষবার retry হচ্ছে..."
+                        page_status[idx]["switched_model"] = False
+                        if status_msg_id:
+                            _spawn_task(_qbm_safe_dash_edit(force=True))
+                        _qbm_forced_start_model_ctx.reset(_tok)
+                        _tok2 = _qbm_forced_start_model_ctx.set("gemini-3.6-flash")
+                        try:
+                            retry2_task = _spawn_task(_run_extract())
+                            retry2_watcher = _spawn_task(_watch_cancel_inner(retry2_task))
+                            try:
+                                mcqs = await asyncio.wait_for(retry2_task, timeout=90)
+                            except asyncio.CancelledError:
+                                mcqs = []
+                            except asyncio.TimeoutError:
+                                # primary also stalled on the second try --
+                                # now actually give up on this page rather
+                                # than blocking the job forever.
+                                logger.warning(f"[QBM] page {page_num} ALSO timed out after 90s on gemini-3.6-flash retry — skipping, moving to next page")
+                                retry2_task.cancel()
+                                try:
+                                    await retry2_task
+                                except Exception:
+                                    pass
+                                mcqs = []
+                                try:
+                                    await send_msg(chat_id, f"⏱️ Page {page_num}: তিনবারেও শেষ হয়নি (সব মডেলই hang) — skip করে পরের page-এ যাচ্ছি।")
+                                except Exception:
+                                    pass
+                            finally:
+                                retry2_watcher.cancel()
+                                try:
+                                    await retry2_watcher
+                                except asyncio.CancelledError:
+                                    pass
+                        finally:
+                            _qbm_forced_start_model_ctx.reset(_tok2)
+                            _tok = None
                     finally:
                         retry_watcher.cancel()
                         try:
@@ -35634,7 +35673,8 @@ async def qbm_extract_all_pages(
                         except asyncio.CancelledError:
                             pass
                 finally:
-                    _qbm_forced_start_model_ctx.reset(_tok)
+                    if _tok is not None:
+                        _qbm_forced_start_model_ctx.reset(_tok)
             finally:
                 watcher.cancel()
                 try:
