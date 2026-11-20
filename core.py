@@ -63,6 +63,11 @@ LMS_SUPABASE_URL = os.environ.get("LMS_SUPABASE_URL", "")
 LMS_SUPABASE_SERVICE_KEY = os.environ.get("LMS_SUPABASE_SERVICE_KEY", "")
 OWNER_ID = 5341425626  # hardcoded — env var was unreliable across HF Space secrets
 
+# Relay group for files that exceed Telegram's 50MB bot-upload limit for direct
+# DM delivery. Bot sends the oversized file here (bot+user both members), then
+# forwards that message into the requesting user's DM. Stays visible in the group.
+RELAY_GROUP_CHAT_ID = int(os.environ.get("CHAT_ID", "0") or 0) or None
+
 CF_WORKER_URL = os.environ.get("CF_WORKER_URL", "https://atlasquizbotpro.hamza818483.workers.dev")
 CF_WORKER_URL_2 = os.environ.get("CF_WORKER_URL_2", "https://quizbot.pages.dev")
 # ── Sticky-fallback: remembers which of the 2 CF endpoints last worked,

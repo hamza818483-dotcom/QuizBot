@@ -126,7 +126,7 @@ from pdf_handler import (
 
 from core import (
     logger, app, sb, sb_exec,
-    BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, OWNER_ID,
+    BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, OWNER_ID, RELAY_GROUP_CHAT_ID,
     CF_WORKER_URL, CF_WORKER_URL_2, HF_SPACE_URL, RENDER_URL, D1_TOKEN, TG_API, GH_PAGES_EXAM_URL, GH_PAGES_QUICK_URL, _tg_mode, _running_on, IS_RENDER, RAM_LIMIT_MB, _malloc_trim,
     d1_set, d1_get, d1_del, d1_query, d1_select, d1_run,
     tg_post, send_msg, send_rich_msg, edit_rich_msg, edit_msg, edit_msg_caption, send_photo, send_photo_by_id,
@@ -12867,18 +12867,57 @@ async def _handle_cut_pdf_command_inner(msg: dict):
                     _malloc_trim()  # actually return the freed reader/writer pages to the OS
             except Exception:
                 pass
-            if status_msg_id:
-                await edit_msg(chat_id, status_msg_id, "⏳ PDF পাঠানো হচ্ছে...")
-            send_res = await send_document(chat_id, out_bytes, out_name,
-                                 caption=f"✂️ Page {start_page}-{end_page} ({end_page - start_page + 1} পাতা)")
-            if not send_res.get("ok"):
-                err = send_res.get("error") or send_res.get("description") or "unknown error"
-                logger.error(f"[Cut] send_document failed: {err}")
+            # 2026-11-20: Telegram's bot-upload cap is 50MB -- a direct DM
+            # send_document above that size fails outright. Route it through
+            # RELAY_GROUP_CHAT_ID (bot+user both members there) instead, then
+            # forward that same message into the user's DM. Group copy stays
+            # visible; only applies when the requester's chat isn't already
+            # that group (sending there directly needs no relay/forward).
+            out_size = len(out_bytes)
+            TG_BOT_UPLOAD_LIMIT = 50 * 1024 * 1024  # 50MB
+            caption = f"✂️ Page {start_page}-{end_page} ({end_page - start_page + 1} পাতা)"
+
+            if out_size > TG_BOT_UPLOAD_LIMIT and RELAY_GROUP_CHAT_ID and chat_id != RELAY_GROUP_CHAT_ID:
                 if status_msg_id:
-                    await edit_msg(chat_id, status_msg_id, f"❌ পাঠাতে ব্যর্থ: {err}")
+                    await edit_msg(chat_id, status_msg_id, "⏳ ফাইল 50MB+ — relay group দিয়ে পাঠানো হচ্ছে...")
+                relay_res = await send_document(RELAY_GROUP_CHAT_ID, out_bytes, out_name, caption=caption)
+                if not relay_res.get("ok"):
+                    err = relay_res.get("error") or relay_res.get("description") or "unknown error"
+                    logger.error(f"[Cut] relay group send_document failed: {err}")
+                    if status_msg_id:
+                        await edit_msg(chat_id, status_msg_id, f"❌ Relay group এ পাঠাতে ব্যর্থ: {err}")
+                    return
+                relay_msg_id = relay_res.get("result", {}).get("message_id")
+                fwd_res = await tg_post("forwardMessage", {
+                    "chat_id": chat_id,
+                    "from_chat_id": RELAY_GROUP_CHAT_ID,
+                    "message_id": relay_msg_id,
+                })
+                if not fwd_res.get("ok"):
+                    err = fwd_res.get("error") or fwd_res.get("description") or "unknown error"
+                    logger.error(f"[Cut] forwardMessage to DM failed: {err}")
+                    if status_msg_id:
+                        await edit_msg(chat_id, status_msg_id, f"❌ DM এ forward করতে ব্যর্থ: {err}\n(Group এ ফাইলটা আছে)")
+                    return
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id, "✅ সম্পন্ন! (50MB+ হওয়ায় relay group হয়ে পাঠানো হয়েছে)")
+            elif out_size > TG_BOT_UPLOAD_LIMIT and not RELAY_GROUP_CHAT_ID:
+                logger.error("[Cut] output >50MB but RELAY_GROUP_CHAT_ID/CHAT_ID env var not set")
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id, "❌ ফাইল 50MB+ কিন্তু relay group configure করা নেই (CHAT_ID env var)।")
                 return
-            if status_msg_id:
-                await edit_msg(chat_id, status_msg_id, "✅ সম্পন্ন!")
+            else:
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id, "⏳ PDF পাঠানো হচ্ছে...")
+                send_res = await send_document(chat_id, out_bytes, out_name, caption=caption)
+                if not send_res.get("ok"):
+                    err = send_res.get("error") or send_res.get("description") or "unknown error"
+                    logger.error(f"[Cut] send_document failed: {err}")
+                    if status_msg_id:
+                        await edit_msg(chat_id, status_msg_id, f"❌ পাঠাতে ব্যর্থ: {err}")
+                    return
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id, "✅ সম্পন্ন!")
         else:
             if single_page > num_pages:
                 if status_msg_id:
