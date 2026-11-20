@@ -1288,10 +1288,17 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
         logger.warning(f"[sendDoc] file {len(file_bytes)}B exceeds CF threshold, skipping CF Worker paths")
 
     # ── Primary: CF Worker (b64 proxy, shared client) ──
+    # 2026-11-21 (user report): a small CSV (few KB) sat for a long time
+    # before the user saw it land -- CF primary was likely slow/flaky and
+    # the old flat 60s timeout meant small-file sends waited the full
+    # window before even trying secondary/direct. Small payloads fail
+    # over at 15s instead; large files (near the 45MB skip_cf threshold)
+    # keep the full 60s since they genuinely need more time to upload.
+    _cf_primary_timeout = 60 if len(file_bytes) > 2 * 1024 * 1024 else 15
     if not skip_cf:
         try:
             c = await _get_shared_http_client()
-            r = await c.post(f"{CF_WORKER_URL}/tg-senddoc", json=data, timeout=60)
+            r = await c.post(f"{CF_WORKER_URL}/tg-senddoc", json=data, timeout=_cf_primary_timeout)
             result = _parse_cf_resp(r, "CF primary")
             if result.get("ok"): return result
             _err_desc = result.get("description") or result.get("error") or ""
