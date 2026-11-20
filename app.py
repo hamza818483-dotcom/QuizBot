@@ -35554,6 +35554,7 @@ async def process_qbm_pages(
 
     summary_pages = []
     all_mcqs_csv = []
+    _global_mcq_keys = set()  # cross-page dedup guard for all_mcqs_csv (2026-11-20 fix)
     first_image_msg_id = None
     page_provider_tally = {}  # page_num -> {"Gemini": n, "Groq": n} for final model-usage summary (post-verify)
     page_call1_tally = {}  # page_num -> {"Gemini": n, "Groq": n} -- ORIGINAL Call1 extraction provider, before Call2 verify relabels it
@@ -35589,6 +35590,10 @@ async def process_qbm_pages(
                     if not _mcqs:
                         continue
                     for m in _mcqs:
+                        _k = _qbm_dedup_key(m)
+                        if _k in _global_mcq_keys:
+                            continue
+                        _global_mcq_keys.add(_k)
                         opts = m.get("options", ["", "", "", ""])
                         all_mcqs_csv.append([m["question"], opts[0] if len(opts) > 0 else "",
                             opts[1] if len(opts) > 1 else "",
@@ -35690,6 +35695,10 @@ async def process_qbm_pages(
                     # looking identical to "this page just doesn't exist".
                     all_mcqs_csv.append([f"⚠️ Page {page_num}: 0 MCQ (retry ladder + safety-net exhausted)", "", "", "", "", "", "", "1", "1"])
                 for m in mcqs:
+                    _k = _qbm_dedup_key(m)
+                    if _k in _global_mcq_keys:
+                        continue
+                    _global_mcq_keys.add(_k)
                     opts = m.get("options", ["", "", "", ""])
                     ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
                     ans_num = ans_map.get(m.get("answer", "A"), "1")
@@ -35778,6 +35787,10 @@ async def process_qbm_pages(
                     # the merged CSV.
                     all_mcqs_csv.append([f"⚠️ Page {page_num}: 0 MCQ (retry ladder + safety-net exhausted)", "", "", "", "", "", "", "1", "1"])
                 for m in mcqs:
+                    _k = _qbm_dedup_key(m)
+                    if _k in _global_mcq_keys:
+                        continue
+                    _global_mcq_keys.add(_k)
                     opts = m.get("options", ["", "", "", ""])
                     ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
                     ans_num = ans_map.get(m.get("answer", "A"), "1")
