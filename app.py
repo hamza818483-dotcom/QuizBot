@@ -20406,6 +20406,17 @@ async def pdf_generate_all_pages(
     lock = asyncio.Lock()
     total_mcq_box = {"n": 0}
     _slot_counter = {"n": 0}
+    # Serialize every dashboard edit (/qbm already does this via
+    # _qbm_dash_lock -- /pdf never did, which let a slower in-flight
+    # concurrent edit (e.g. the 4s ticker) arrive at Telegram AFTER a
+    # faster one and silently clobber it back, e.g. hiding the
+    # model-switch stall notice right after it appeared (user report
+    # 2026-11-20).
+    _pdf_dash_lock = asyncio.Lock()
+    _orig_update_pdf_dashboard = _update_pdf_dashboard
+    async def _update_pdf_dashboard(*a, **kw):
+        async with _pdf_dash_lock:
+            return await _orig_update_pdf_dashboard(*a, **kw)
 
     # PAGE-BUTTON REGEN QUEUE: while processing is live, the dashboard shows
     # a per-page inline button under each ✅ Done page. Clicking it does NOT
