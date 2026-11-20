@@ -20151,6 +20151,12 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
                 _g_acct = s.get("gemini_account")
                 _g_att = s.get("gemini_attempt")
                 acct_str = f" 🔑{_g_acct}#{_g_att}" if _g_acct else ""
+                _g_accts2 = s.get("gemini_accounts")
+                _g_keytries = s.get("gemini_key_attempts")
+                if _g_accts2 or _g_keytries:
+                    _accts_part = f"👤{_g_accts2}" if _g_accts2 else ""
+                    _tries_part = f" 🔑x{_g_keytries}" if _g_keytries else ""
+                    acct_str += f" [{_accts_part}{_tries_part}]"
                 lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ{model_str}{topic_str}{secs_str}{calls_str}{acct_str} ✓")
         elif s["current"]:
             _stage = s.get("stage") or "Processing..."
@@ -28359,6 +28365,12 @@ _v_stage_cb_ctx = contextvars.ContextVar("v_stage_cb", default=None)
 # to abandonment. Set around the retry call only; _qbm_gemini_raw's very
 # first (non-recursive) call checks this to pick its starting model.
 _qbm_forced_start_model_ctx = contextvars.ContextVar("qbm_forced_start_model", default=None)
+# 2026-11-20 (user request): live dashboard should show how many Gemini
+# keys were tried before this page succeeded -- a mutable {"n": count}
+# dict stashed per-page in this contextvar; _qbm_gemini_raw bumps it on
+# every key attempt (success or fail) it makes for the page currently
+# running in this async context.
+_QBM_PAGE_KEY_ATTEMPTS_CTX = contextvars.ContextVar("qbm_page_key_attempts", default=None)
 
 
 def _v_stage(text: str) -> None:
@@ -28891,6 +28903,9 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 # retries look like normal spaced traffic.
                 await asyncio.sleep(random.uniform(0.15, 0.6))
             key_rotator.record_call(key)
+            _qka = _QBM_PAGE_KEY_ATTEMPTS_CTX.get()
+            if _qka is not None:
+                _qka["n"] += 1
             try:
                 async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(
@@ -29259,6 +29274,9 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
                 # retries look like normal spaced traffic.
                 await asyncio.sleep(random.uniform(0.15, 0.6))
             key_rotator.record_call(key)
+            _qka = _QBM_PAGE_KEY_ATTEMPTS_CTX.get()
+            if _qka is not None:
+                _qka["n"] += 1
             try:
                 async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(
@@ -35001,6 +35019,14 @@ async def qbm_extract_all_pages(
         mcqs = []
         _page_start_ts = time.time()
         _page_ai_calls_before = _get_ai_call_count(chat_id)
+        # 2026-11-20 (user request): live dashboard should show which
+        # Gemini account + how many keys it took to succeed on this page --
+        # mutable objects stashed in contextvars so nested/retried Gemini
+        # calls for THIS page accumulate into the same counters/set even
+        # across the force-model retry pass below.
+        _qbm_page_key_attempts = {"n": 0}
+        _attempts_tok = _QBM_PAGE_KEY_ATTEMPTS_CTX.set(_qbm_page_key_attempts)
+        _accts_tok = _qbm_page_used_accounts_ctx.set(set())
         if strict_calls:
             # /v: live per-page stage line (which call is running right now)
             _set_page_req_ctx(page_status[idx])
@@ -35262,6 +35288,18 @@ async def qbm_extract_all_pages(
             if _prov:
                 _counts[_prov] = _counts.get(_prov, 0) + 1
         page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _counts.items())
+        # 2026-11-20 (user request): account(s) + total key-attempts it took
+        # Gemini to succeed on this page, for the live dashboard.
+        try:
+            _accts_used = _qbm_page_used_accounts_ctx.get()
+            if _accts_used:
+                page_status[idx]["gemini_accounts"] = ", ".join(sorted(_accts_used))
+            page_status[idx]["gemini_key_attempts"] = _qbm_page_key_attempts["n"]
+        except Exception:
+            pass
+        finally:
+            _QBM_PAGE_KEY_ATTEMPTS_CTX.reset(_attempts_tok)
+            _qbm_page_used_accounts_ctx.reset(_accts_tok)
         # Detected topic for this page: last non-empty topic_hint among this
         # page's own MCQs (covers /unmesh + /topic + /chem style extractors
         # that emit topic_hint per MCQ); also honors a trailing_topic_marker-
