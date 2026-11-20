@@ -35448,8 +35448,14 @@ async def qbm_extract_all_pages(
                     pass
                 # 2026-11-20 (user request): live dashboard should also show
                 # this switch while the retry is in flight, not just via the
-                # Telegram message above.
+                # Telegram message above. Must set BOTH fields -- "stage" is
+                # read by the group/channel dashboard (_build_dashboard's
+                # elif s["current"] branch), but the DM dashboard's "🔴 Now"
+                # block (_build_dashboard_v, strict_calls=True) reads
+                # "v_now" instead, not "stage" -- setting only "stage" left
+                # the switch invisible in DM (bug found 2026-11-20).
                 page_status[idx]["stage"] = "🔁 1min stall — gemini-3.5-flash-lite দিয়ে retry হচ্ছে..."
+                page_status[idx]["v_now"] = "🔁 1min stall — gemini-3.5-flash-lite দিয়ে retry হচ্ছে..."
                 page_status[idx]["switched_model"] = True
                 if status_msg_id:
                     _spawn_task(_qbm_safe_dash_edit())
