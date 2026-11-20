@@ -27063,6 +27063,21 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
                 m["_effective_hint"] = hint
             else:
                 m["_effective_hint"] = last_hint or ""
+                if not last_hint:
+                    # Fix (2026-11-21, user-reported "Topic 1" fallback mystery):
+                    # this is the exact point where topic detection genuinely
+                    # fails -- model returned no topic_hint for this MCQ AND no
+                    # earlier MCQ (this page or any prior page) had one to carry
+                    # forward either, so it's about to fall through to the
+                    # generic "Topic N" name downstream. Previously 100% silent;
+                    # now logged so a failed detection is visible in logs
+                    # instead of only showing up as an unexplained generic name
+                    # in the output.
+                    logger.warning(
+                        f"[TopicDetect] no topic_hint found for qsn_no={m.get('qsn_no')} "
+                        f"on page {m.get('_page_num')} (no banner on this page, and no "
+                        f"earlier hint to carry forward) — will fall back to generic 'Topic N' name"
+                    )
             flat.append(m)
 
     # CODE-LEVEL CHECK (final stage, across page boundaries): a segment
