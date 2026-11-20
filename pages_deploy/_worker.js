@@ -779,6 +779,30 @@ async function handleTgSendDoc(request) {
     const filename = body.filename || 'file';
     const isAscii = /^[\x00-\x7F]*$/.test(filename);
 
+    // 2026-11-21: same primary-IP-range routing issue as handleTgProxy
+    // (149.154.166.x intermittently unreachable from Cloudflare's network)
+    // was hitting document sends too, but this handler had NO timeout and
+    // NO secondary-IP fallback -- so a bad route here just hung until the
+    // Python-side client timeout (15s for small files, see core.py), which
+    // then logged an empty-message error and fell through to a dead direct
+    // path (api.telegram.org unreachable from HF). Wrap the actual TG call
+    // in the same timeout+retry pattern used for tg-proxy.
+    async function sendDocToTelegram(fetchUrl, opts, ipOverride) {
+      const finalOpts = { ...opts, signal: AbortSignal.timeout(20000) };
+      if (ipOverride) finalOpts.cf = { resolveOverride: ipOverride };
+      return await fetch(fetchUrl, finalOpts);
+    }
+    async function sendDocWithRetry(fetchUrl, opts) {
+      try {
+        return await sendDocToTelegram(fetchUrl, opts, null);
+      } catch (e1) {
+        if (e1.name !== 'TimeoutError' && e1.name !== 'AbortError') throw e1;
+        // Primary route timed out -- retry once against Telegram's
+        // secondary IP range before giving up (mirrors handleTgProxy).
+        return await sendDocToTelegram(fetchUrl, opts, '149.154.167.220');
+      }
+    }
+
     let resp;
     if (isAscii) {
       // Plain ASCII filename (e.g. English PDF names) — the built-in
@@ -790,7 +814,7 @@ async function handleTgSendDoc(request) {
       formData.append('document', new Blob([bytes], { type: body.mime_type || 'application/octet-stream' }), filename);
       if (body.reply_to_message_id) formData.append('reply_to_message_id', String(body.reply_to_message_id));
       if (body.message_thread_id) formData.append('message_thread_id', String(body.message_thread_id));
-      resp = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, { method: 'POST', body: formData });
+      resp = await sendDocWithRetry(`https://api.telegram.org/bot${token}/sendDocument`, { method: 'POST', body: formData });
     } else {
       // Non-ASCII filename (Bengali/etc) — CONFIRMED: Telegram Bot API does
       // NOT honor filename*=UTF-8''... (shows the ASCII fallback instead).
@@ -845,7 +869,7 @@ async function handleTgSendDoc(request) {
       let offset = 0;
       for (const p of parts) { fullBody.set(p, offset); offset += p.length; }
 
-      resp = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {
+      resp = await sendDocWithRetry(`https://api.telegram.org/bot${token}/sendDocument`, {
         method: 'POST',
         headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
         body: fullBody,
@@ -857,7 +881,8 @@ async function handleTgSendDoc(request) {
       status: resp.status, headers: { 'Content-Type': 'application/json' }
     });
   } catch (e) {
-    return jsonResp({ ok: false, error: e.message }, 500);
+    const isTimeout = e.name === 'TimeoutError' || e.name === 'AbortError';
+    return jsonResp({ ok: false, error: (isTimeout ? 'Telegram API timeout (both primary and fallback IP failed): ' : '') + e.message }, isTimeout ? 504 : 500);
   }
 }
 
