@@ -20315,6 +20315,25 @@ def _build_dashboard_v(file_name, topic, pages, page_status, start_time, total_m
     return base + "\n" + sep + "\n" + "\n".join(now)
 
 
+def _build_page_model_breakdown(page_status: list) -> str:
+    """Shared final-summary line builder for /eng, /topic, /rqb (and any
+    other qbm_extract_all_pages caller that passes page_status_out) --
+    turns the per-page page_status list into the same '✅ Page N: M MCQ
+    (model:count)' breakdown /qbm's own completion message shows, so the
+    live dashboard's per-page + model history survives into the final
+    summary instead of being overwritten by a generic '✅ সম্পন্ন!' line."""
+    if not page_status:
+        return ""
+    lines = []
+    for s in page_status:
+        if s.get("failed") or not s.get("mcq"):
+            continue
+        model_tag = s.get("model", "")
+        model_str = f" ({model_tag})" if model_tag else ""
+        lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ{model_str}")
+    return "\n".join(lines)
+
+
 async def _update_pdf_dashboard(chat_id, message_id, *dash_args, reply_markup=None, **dash_kwargs):
     """Shared dashboard-update helper: DM (chat_id > 0) -> rich table via
     edit_rich_msg (auto-falls back to plain HTML edit_msg on any error).
@@ -31139,8 +31158,10 @@ async def _handle_topic_impl(msg: dict):
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Extraction শুরু হচ্ছে (topic detect সহ)...")
 
+        _topic_page_status_out = []
         extracted_pages = await qbm_extract_all_pages(
             chat_id, pages, "Topic Extract", file_name, status_msg_id,
+            page_status_out=_topic_page_status_out,
             extractor=_topic_extract_from_image, file_id=file_id
         )
 
@@ -31161,8 +31182,12 @@ async def _handle_topic_impl(msg: dict):
         if topic_channel_id:
             total_polls = await _post_topic_groups_to_channel(topic_channel_id, topic_groups, topic_thread_id)
             if status_msg_id:
+                _pm_breakdown = _build_page_model_breakdown(_topic_page_status_out)
                 await edit_msg(chat_id, status_msg_id,
-                    f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে {total_polls}টি poll channel-এ পাঠানো হয়েছে।")
+                    "✅ <b>Topic Extraction Complete!</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    + (f"{_pm_breakdown}\n━━━━━━━━━━━━━━━━━━━━━━\n" if _pm_breakdown else "")
+                    + f"📝 মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে {total_polls}টি poll channel-এ পাঠানো হয়েছে।")
             return
 
         _ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
@@ -31223,8 +31248,12 @@ async def _handle_topic_impl(msg: dict):
                 reply_to_message_id=_cmd_msg_id)
 
         if status_msg_id:
+            _pm_breakdown = _build_page_model_breakdown(_topic_page_status_out)
             await edit_msg(chat_id, status_msg_id,
-                f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।")
+                "✅ <b>Topic Extraction Complete!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                + (f"{_pm_breakdown}\n━━━━━━━━━━━━━━━━━━━━━━\n" if _pm_breakdown else "")
+                + f"📝 মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।")
 
     except _DownloadCancelled:
         # 2026-11-18 (user request): download-phase Cancel pressed. The
@@ -31318,8 +31347,10 @@ async def _handle_eng_impl(msg: dict):
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Extraction শুরু হচ্ছে (topic detect সহ)...")
 
+        _eng_page_status_out = []
         extracted_pages = await qbm_extract_all_pages(
             chat_id, pages, "Eng Extract", file_name, status_msg_id,
+            page_status_out=_eng_page_status_out,
             extractor=_eng_extract_from_image, file_id=file_id
         )
 
@@ -31340,8 +31371,12 @@ async def _handle_eng_impl(msg: dict):
         if eng_channel_id:
             total_polls = await _post_topic_groups_to_channel(eng_channel_id, topic_groups, eng_thread_id)
             if status_msg_id:
+                _pm_breakdown = _build_page_model_breakdown(_eng_page_status_out)
                 await edit_msg(chat_id, status_msg_id,
-                    f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে {total_polls}টি poll channel-এ পাঠানো হয়েছে।")
+                    "✅ <b>Eng Extraction Complete!</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    + (f"{_pm_breakdown}\n━━━━━━━━━━━━━━━━━━━━━━\n" if _pm_breakdown else "")
+                    + f"📝 মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে {total_polls}টি poll channel-এ পাঠানো হয়েছে।")
             return
 
         _ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
@@ -31402,8 +31437,12 @@ async def _handle_eng_impl(msg: dict):
                 reply_to_message_id=_cmd_msg_id)
 
         if status_msg_id:
+            _pm_breakdown = _build_page_model_breakdown(_eng_page_status_out)
             await edit_msg(chat_id, status_msg_id,
-                f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।")
+                "✅ <b>Eng Extraction Complete!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                + (f"{_pm_breakdown}\n━━━━━━━━━━━━━━━━━━━━━━\n" if _pm_breakdown else "")
+                + f"📝 মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।")
 
     except _DownloadCancelled:
         # 2026-11-18 (user request): download-phase Cancel pressed. The
@@ -31500,8 +31539,10 @@ async def _handle_rqb_impl(msg: dict):
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Extraction শুরু হচ্ছে (topic detect সহ)...")
 
+        _rqb_page_status_out = []
         extracted_pages = await qbm_extract_all_pages(
             chat_id, pages, "RQB Extract", file_name, status_msg_id,
+            page_status_out=_rqb_page_status_out,
             extractor=_rqb_extract_from_image, file_id=file_id
         )
 
@@ -31522,8 +31563,12 @@ async def _handle_rqb_impl(msg: dict):
         if rqb_channel_id:
             total_polls = await _post_topic_groups_to_channel(rqb_channel_id, topic_groups, rqb_thread_id)
             if status_msg_id:
+                _pm_breakdown = _build_page_model_breakdown(_rqb_page_status_out)
                 await edit_msg(chat_id, status_msg_id,
-                    f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে {total_polls}টি poll channel-এ পাঠানো হয়েছে।")
+                    "✅ <b>RQB Extraction Complete!</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    + (f"{_pm_breakdown}\n━━━━━━━━━━━━━━━━━━━━━━\n" if _pm_breakdown else "")
+                    + f"📝 মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে {total_polls}টি poll channel-এ পাঠানো হয়েছে।")
             return
 
         _ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
@@ -31584,8 +31629,12 @@ async def _handle_rqb_impl(msg: dict):
                 reply_to_message_id=_cmd_msg_id)
 
         if status_msg_id:
+            _pm_breakdown = _build_page_model_breakdown(_rqb_page_status_out)
             await edit_msg(chat_id, status_msg_id,
-                f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।")
+                "✅ <b>RQB Extraction Complete!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                + (f"{_pm_breakdown}\n━━━━━━━━━━━━━━━━━━━━━━\n" if _pm_breakdown else "")
+                + f"📝 মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।")
 
     except _DownloadCancelled:
         # 2026-11-18 (user request): download-phase Cancel pressed. The
