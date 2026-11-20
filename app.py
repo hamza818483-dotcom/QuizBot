@@ -23155,6 +23155,27 @@ UNMESH_EXTRACT_PROMPT_GROQ_COMPACT = _strip_explanation(UNMESH_EXTRACT_PROMPT_GR
 ENG_EXTRACT_PROMPT_GROQ_COMPACT = _strip_explanation(ENG_EXTRACT_PROMPT_GROQ_COMPACT)
 
 
+RQB_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
+    'OUTPUT: valid JSON array only, no extra text/markdown. No MCQ → [].\n'
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]',
+    'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
+    '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. ০১. → 1, ২১. → 21, Q5 → 5). This is used for ordering/dedup — read it carefully and precisely for every single MCQ. Use null ONLY if truly zero visible numbering exists for that MCQ. IMPORTANT: unlike some other page styles, numbering on THIS page style does NOT necessarily restart at 1 when a new topic starts — a new topic can begin mid-sequence (e.g. continuing 06, 07, 08... across a topic change) just as easily as restarting at 01. NEVER use a numbering reset/restart as a signal for a topic boundary here — the ONLY valid topic-boundary signal is the pink banner itself (see topic_hint below).\n'
+    '- "topic_hint": the text inside a SOLID PINK/MAGENTA FILLED BANNER BAR that this MCQ falls under (e.g. "Identification of Parts of Speech", "Same Word Used as Different Parts of Speech") — this is the actual topic name and is CRITICAL, used to detect topic boundaries. STRICT RULE: only a bar that (i) spans the FULL width of the page/column area (edge to edge, not a small box) AND (ii) has a SOLID PINK/MAGENTA/ROSE FILLED background AND (iii) has its text printed in WHITE font INSIDE that bar qualifies as a topic banner. ‼️ IGNORE THE TOP-OF-PAGE DECORATIVE HEADER BAR: the LARGEST pink banner, the one right at the very top of the page (often containing just a broad section label like "Parts Of Speech", "Grammar Part", a chapter/subject title, a page-decoration ribbon, or site-watermark text) is NEVER a topic_hint — it is page decoration/section-chrome, always ignore it and never treat it as starting or ending a topic, regardless of how large or prominent it is. Only the SMALLER pink banners BELOW that top decorative bar (sub-heading bars introducing a specific identification/grammar-rule/exercise group) are real topic_hint candidates. A small/short box, a lightly-shaded or non-pink colored box, a pink bar with non-white (e.g. black or dark) text, or any bar that does not stretch the full column width is NEVER a topic_hint, no matter what text it contains — treat it as ordinary content and keep the previously active topic_hint. Do NOT confuse this full-width WHITE-FONT-ON-PINK-BAR topic banner with any inline "Ans:" label or red/colored answer text next to an MCQ (that is the answer indicator, never a topic name). Rules:\n'
+    '  a) The topic does NOT have to start right at the top of the page or at MCQ #1 of the page — a page can begin mid-topic (continuing the previous page\'s topic with no new banner at the top) and only switch topics partway down when a new pink sub-heading banner appears. Never assume a new topic starts automatically just because a page begins; only a genuinely NEW pink banner (distinct text from what was already active) marks a new topic.\n'
+    '  b) If a new pink sub-heading banner appears anywhere on THIS page (even partway down, even if a different banner was active at the top of the page), every MCQ from that point onward gets the NEW banner text; MCQs above it on the same page keep the banner that was already active for them.\n'
+    '  b2) TWO-COLUMN pages: left and right columns can each have their OWN active banner, independent of each other. Determine each MCQ\'s topic_hint by which pink banner is ACTUALLY above it in ITS OWN column, never by copying the other column\'s current banner.\n'
+    '  c) If this specific page has genuinely no pink sub-heading banner visible anywhere on it (pure continuation page, no new banner printed — e.g. still only the top decorative bar), use the SAME topic_hint that was already active from the previous page/segment for every MCQ on this page — do not guess or invent a new one, and do not output "" unless this is truly the very first MCQ of the whole document with no banner seen yet.\n'
+    '  d) Every MCQ under the same visible pink banner on this page must get the EXACT SAME topic_hint string, character-for-character.\n\n'
+    'OUTPUT ORDER: top-to-bottom, column-major as in the base rules above — switch columns only at genuine column boundaries, carrying topic_hint/qsn_no boundaries exactly as they occur in that reading order.\n'
+    'Before finalizing output, recount: every MCQ visible on the page MUST appear exactly once in the JSON array — zero skipped, zero duplicated. IMPORTANT PRIORITY: getting every MCQ extracted (none skipped) is more important than getting the topic boundary perfectly placed — if unsure exactly where a boundary falls, still include every MCQ you can see.\n\n'
+    'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"..."}]'
+)
+RQB_EXTRACT_PROMPT_GROQ_COMPACT = _swap_to_compact_base(RQB_EXTRACT_PROMPT)
+RQB_EXTRACT_PROMPT = _strip_explanation(RQB_EXTRACT_PROMPT)
+RQB_EXTRACT_PROMPT_GROQ_COMPACT = _strip_explanation(RQB_EXTRACT_PROMPT_GROQ_COMPACT)
+
+
 def _check_segment_topic_consistency(mcqs: list, context: str = "", forced_boundaries: set = None) -> list:
     """CODE-LEVEL CHECK (used at both Call1 and Call2 stages): walks mcqs in
     read order and finds every 'segment' — the run of MCQs from one
@@ -23620,6 +23641,104 @@ async def _eng_extract_from_image(img, cache_key: tuple = None) -> list:
         mcqs = _check_segment_serial_order(mcqs, context="ENG-Call2")
     except Exception as e:
         logger.warning(f"[ENG verify] audit pass failed, skipping: {e}")
+
+    return mcqs
+
+
+async def _rqb_extract_from_image(img, cache_key: tuple = None) -> list:
+    """/rqb's extractor — same pipeline shape as /eng's _eng_extract_from_image
+    (Call1 extract + Call2 audit) but with RQB_EXTRACT_PROMPT: topic boundary
+    is a full-width PINK/MAGENTA bar with WHITE font topic text (ignoring the
+    larger top-of-page decorative pink header bar), answer uses the base
+    circled-option detection (no black Ans badge on this page style). Own
+    cache namespace (_rqb_mcq_result_cache) since this command's extraction
+    shape differs from /eng's and /topic's."""
+    async def _run_extract_call(bypass_cache: bool = False):
+        cached = _rqb_mcq_result_cache.get(cache_key) if (cache_key and not bypass_cache) else None
+        if cached:
+            logger.info(f"[RQB MCQ Cache] hit for {cache_key} — skipping Call1, still running full Call2 verify")
+            return _qbm_dedup_list(cached)
+        gem = await _qbm_gemini_extract(img, RQB_EXTRACT_PROMPT)
+        result = _qbm_dedup_list(gem) if gem else []
+        if result and cache_key:
+            _rqb_mcq_result_cache[cache_key] = result
+            _cap_qbm_mcq_cache(_rqb_mcq_result_cache)
+        return result
+
+    mcqs = await _run_extract_call()
+    if not mcqs:
+        return mcqs
+
+    mcqs = _check_segment_topic_consistency(mcqs, context="RQB-Call1")
+    mcqs = _check_segment_serial_order(mcqs, context="RQB-Call1")
+
+    try:
+        verify_prompt = _build_topic_verify_prompt(mcqs)
+        check_txt = await _qbm_gemini_raw(img, verify_prompt)
+        check = _parse_count_check_json(check_txt)
+
+        missing_nums = set(n for n in (check.get("missing_qsn_no") or []) if isinstance(n, int))
+        wrong_serials = check.get("wrong_serials") or []
+        word_fixes = check.get("word_fixes") or []
+        topic_leaks = check.get("topic_leaks") or []
+
+        by_qsn = {m.get("qsn_no"): m for m in mcqs if isinstance(m.get("qsn_no"), int)}
+
+        if missing_nums:
+            logger.warning(f"[RQB verify] missing qsn_no {sorted(missing_nums)} — re-extracting page")
+            for _retry_attempt in range(2):
+                if not missing_nums:
+                    break
+                retry_mcqs = await _run_extract_call(bypass_cache=True)
+                retry_got = {m.get("qsn_no"): m for m in retry_mcqs if isinstance(m.get("qsn_no"), int)}
+                recovered = set()
+                for n in missing_nums:
+                    if n in retry_got:
+                        mcqs.append(retry_got[n])
+                        by_qsn[n] = retry_got[n]
+                        recovered.add(n)
+                missing_nums -= recovered
+                if missing_nums and _retry_attempt == 0:
+                    logger.warning(f"[RQB verify] still missing qsn_no {sorted(missing_nums)} after retry 1 — trying once more")
+
+        for fix in wrong_serials:
+            was = fix.get("was")
+            correct = fix.get("qsn_no_wrong")
+            if isinstance(was, int) and isinstance(correct, int) and was in by_qsn:
+                by_qsn[was]["qsn_no"] = correct
+                logger.warning(f"[RQB verify] serial fixed: {was} -> {correct}")
+
+        for fix in word_fixes:
+            n = fix.get("qsn_no")
+            field = (fix.get("field") or "").strip().lower().replace(" ", "").replace("_", "")
+            text = fix.get("correct_text")
+            if not (isinstance(n, int) and text and n in by_qsn):
+                continue
+            m = by_qsn[n]
+            if field == "question":
+                m["question"] = text
+                logger.warning(f"[RQB verify] word fix qsn {n} question")
+            elif field == "answer":
+                m["answer"] = text
+                logger.warning(f"[RQB verify] word fix qsn {n} answer -> {text}")
+            elif field in _OPT_FIELD_IDX and isinstance(m.get("options"), list) and len(m["options"]) == 4:
+                m["options"][_OPT_FIELD_IDX[field]] = text
+                logger.warning(f"[RQB verify] word fix qsn {n} {field}")
+
+        for leak in topic_leaks:
+            n = leak.get("qsn_no")
+            actual = (leak.get("actual_banner") or "").strip()
+            logger.warning(
+                f"[RQB verify] possible topic leak qsn {n}: "
+                f"extracted='{(leak.get('extracted_hint') or '')[:30]}' "
+                f"actual='{actual[:30]}' (not auto-fixed)"
+            )
+
+        mcqs = _qbm_dedup_list(mcqs)
+        mcqs = _check_segment_topic_consistency(mcqs, context="RQB-Call2")
+        mcqs = _check_segment_serial_order(mcqs, context="RQB-Call2")
+    except Exception as e:
+        logger.warning(f"[RQB verify] audit pass failed, skipping: {e}")
 
     return mcqs
 
@@ -27964,6 +28083,7 @@ _qbm_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict] (post-C
 # wrong-shaped result across commands.
 _topic_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict]
 _eng_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict], /eng's own cache namespace
+_rqb_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict], /rqb's own cache namespace
 _unmesh_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict]
 _bcs_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict]
 _chem_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict]
@@ -31274,6 +31394,189 @@ async def _handle_eng_impl(msg: dict):
     except Exception as e:
         logger.error(f"[ENG] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
+
+
+async def handle_rqb(msg: dict):
+    """/rqb -p (pages) — same arg style as /topic/eng/pdf/qbm. Extracts existing
+    MCQ (never generates new) like /topic/eng, but tuned for the pink-banner
+    page style (e.g. Rotina/Retina question-bank books): topic boundary is
+    a full-width PINK/MAGENTA bar with the topic name in WHITE font, ignoring
+    the larger decorative pink header bar at the very top of the page. Like
+    /unmesh, serial numbering does NOT necessarily restart at 1 on a new
+    topic — topic change is detected purely from the pink banner itself, not
+    from qsn_no resetting. Answer uses the base circled-option / inline
+    "Ans:" detection (no black Ans badge on this page style). Sends ONE
+    separate CSV per detected topic plus a merged CSV with topic-marker rows,
+    exactly like /topic/eng's output."""
+    uid = msg["from"]["id"]
+    chat_id = msg["chat"]["id"]
+    lock = _get_pdfm_lock(uid)
+    if lock.locked():
+        _PDFM_USER_QUEUE_LEN[uid] = _PDFM_USER_QUEUE_LEN.get(uid, 0) + 1
+        pos = _PDFM_USER_QUEUE_LEN[uid]
+        try:
+            await send_msg(chat_id, f"⏳ আগের PDF/PPT কাজ শেষ হচ্ছে... তোমার এই request queue তে #{pos} নম্বরে আছে, একে একে সব হয়ে যাবে।")
+        except Exception:
+            pass
+    async with lock:
+        _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
+        _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+        try:
+            return await _handle_rqb_impl(msg)
+        finally:
+            _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
+
+
+async def _handle_rqb_impl(msg: dict):
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "")
+    reply = msg.get("reply_to_message")
+
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id,
+            "❌ PDF-এ reply করে /rqb দাও!\n\n"
+            "<b>Format:</b>\n"
+            "<code>/rqb -p 1-10</code>\n\n"
+            "📌 Page-এ থাকা MCQ extract করে (নতুন বানায় না) — topic ধরে full-width গোলাপি/pink "
+            "ব্যানারে সাদা ফন্টে লেখা নাম দেখে (উপরের বড় decorative pink bar বাদে)।\n"
+            "📌 -p = page range (না দিলে সব page)\n"
+            "📌 -c channel_id = দিলে CSV না, প্রতি টপিকের নামসহ header দিয়ে channel-এ সরাসরি poll পাঠাবে"
+        )
+        return
+
+    file_name = reply["document"].get("file_name", "document.pdf")
+    if not file_name.lower().endswith(".pdf"):
+        await send_msg(chat_id, "❌ শুধু PDF file support করে!")
+        return
+
+    file_id = reply["document"]["file_id"]
+    file_unique_id = reply["document"].get("file_unique_id")
+    params = _parse_pdfm_params(text)
+    page_range = params["page_range"]
+    rqb_channel_id = params["channel_id"]
+    rqb_thread_id = params["thread_id"]
+
+    status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}")
+    status_msg_id = status_r.get("result", {}).get("message_id") if status_r.get("ok") else None
+    # 2026-11-18 (user request): Cancel button on every file-download
+    # progress message -- see _handle_qbm_impl for the full explanation.
+    if status_msg_id:
+        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}",
+                             reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
+    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, None) if status_msg_id else None
+
+    try:
+        pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_cb_wrapped, chat_id=chat_id,
+                                                message_id=reply["message_id"], file_unique_id=file_unique_id)
+        ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
+        if not ok:
+            await send_msg(chat_id, pages)
+            return
+        if not pages:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ Page পাওয়া যায়নি!")
+            return
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Extraction শুরু হচ্ছে (topic detect সহ)...")
+
+        extracted_pages = await qbm_extract_all_pages(
+            chat_id, pages, "RQB Extract", file_name, status_msg_id,
+            extractor=_rqb_extract_from_image, file_id=file_id
+        )
+
+        total_mcq_found = sum(len(mcqs) for _, _, mcqs in extracted_pages)
+        if not total_mcq_found:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ কোনো MCQ পাওয়া যায়নি!")
+            return
+
+        topic_groups = _topic_group_mcqs(extracted_pages)
+
+        if status_msg_id:
+            breakdown = "\n".join(f"📂 {name}: {len(mcqs)} MCQ" for name, mcqs in topic_groups)
+            next_step = "channel-এ poll পাঠানো হচ্ছে..." if rqb_channel_id else "CSV পাঠানো হচ্ছে..."
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ Extraction Complete!\n📝 Total MCQ: {total_mcq_found} | 📂 Topics: {len(topic_groups)}\n\n{breakdown}\n\n⏳ {next_step}")
+
+        if rqb_channel_id:
+            total_polls = await _post_topic_groups_to_channel(rqb_channel_id, topic_groups, rqb_thread_id)
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id,
+                    f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে {total_polls}টি poll channel-এ পাঠানো হয়েছে।")
+            return
+
+        _ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
+        import io as _io_rqb, csv as _csv_rqb
+        _running_count = 0
+        _cmd_msg_id = msg.get("message_id")
+        _merged_buf = _io_rqb.StringIO()
+        _merged_w = _csv_rqb.writer(_merged_buf)
+        _merged_w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
+                             "answer", "explanation", "type", "section"])
+        for name, mcqs in topic_groups:
+            buf = _io_rqb.StringIO()
+            w = _csv_rqb.writer(buf)
+            w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
+                        "answer", "explanation", "type", "section"])
+            _num_mg, _bn_name_mg = _split_topic_number_and_bangla_name(name)
+            _merged_w.writerow([_bn_name_mg, "", "", "", "", "", "", "", "", ""])
+            for m in mcqs:
+                opts = m.get("options", ["", "", "", ""])
+                row = [
+                    m.get("question", ""), opts[0] if len(opts) > 0 else "",
+                    opts[1] if len(opts) > 1 else "", opts[2] if len(opts) > 2 else "",
+                    opts[3] if len(opts) > 3 else "", opts[4] if len(opts) > 4 else "",
+                    _ans_map.get(m.get("answer", "A"), "1"),
+                    _strip_img_tag(m.get("explanation", "")), "1", "1"
+                ]
+                w.writerow(row)
+                _merged_w.writerow(row)
+            _num_fn, _bn_name_fn = _split_topic_number_and_bangla_name(name)
+            safe_name = re.sub(r'[\\/:*?"<>|]', '_', _bn_name_fn).strip() or "Topic"
+            range_start = _running_count + 1
+            range_end = _running_count + len(mcqs)
+            _running_count = range_end
+            _pg_nums = sorted({m.get("_page_num") for m in mcqs if m.get("_page_num") is not None})
+            if _pg_nums:
+                page_range_text = f"{_pg_nums[0]}" if len(_pg_nums) == 1 else f"{_pg_nums[0]}–{_pg_nums[-1]}"
+            else:
+                page_range_text = "N/A"
+            _num, _bn_name = _split_topic_number_and_bangla_name(name)
+            _num_prefix = f"{_html_escape(_num)} " if _num else ""
+            await send_document(chat_id, buf.getvalue().encode("utf-8"),
+                f"{safe_name}.csv",
+                caption=(f"📂 {_num_prefix}<code>{_html_escape(_bn_name)}</code>\n"
+                         f"📄 PDF Page: {page_range_text}\n"
+                         f"🔢 MCQ Range: {range_start}–{range_end}\n"
+                         f"💎 Total: {len(mcqs)}"),
+                mime_type="text/csv",
+                reply_to_message_id=_cmd_msg_id)
+
+        if len(topic_groups) > 1:
+            _merged_file_base = re.sub(r'[\\/:*?"<>|]', '_', file_name.rsplit(".", 1)[0]).strip() or "Topic"
+            await send_document(chat_id, _merged_buf.getvalue().encode("utf-8"),
+                f"{_merged_file_base}_Merged.csv",
+                caption=(f"📚 <b>All Topics Merged</b>\n"
+                         f"📂 Topics: {len(topic_groups)}\n"
+                         f"💎 Total MCQ: {total_mcq_found}"),
+                mime_type="text/csv",
+                reply_to_message_id=_cmd_msg_id)
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।")
+
+    except _DownloadCancelled:
+        # 2026-11-18 (user request): download-phase Cancel pressed. The
+        # dlcancel_ callback only EDITED the message (kept it visible
+        # until the transfer actually stops) -- this is that stop point,
+        # so delete it for real now.
+        await _dl_cancel_cleanup(chat_id, status_msg_id)
+    except Exception as e:
+        logger.error(f"[RQB] Error: {e}", exc_info=True)
+        await _safe_error_reply(chat_id, e)
+
 
 
 async def handle_bio(msg: dict):
@@ -39834,6 +40137,15 @@ async def handle_message(msg: dict):
         # (not a circled option), and topic boundary is a full-width BLACK
         # banner with the topic name in WHITE font (+ qsn_no restarting at 1)
         _spawn_command_task(uid, handle_eng(msg))
+    elif text.startswith("/rqb"):
+        # /rqb = same idea as /topic/eng (extracts existing MCQ, groups by
+        # detected topic into per-topic CSV + merged CSV with topic-marker
+        # rows) but tuned for pink-banner question-bank page style: topic
+        # boundary is a full-width PINK/MAGENTA banner with WHITE font text,
+        # ignoring the larger decorative pink header bar at the top of the
+        # page. Numbering does NOT reset at topic change here (like /unmesh)
+        # — topic detection relies purely on the pink banner, not qsn_no.
+        _spawn_command_task(uid, handle_rqb(msg))
     elif text.startswith("/biot"):
         # /biot = Call1-ONLY diagnostic for /bio: runs just the heading-scan
         # stage (no MCQ generation, no CSV) and reports whether the scan is
