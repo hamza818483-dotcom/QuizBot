@@ -20418,13 +20418,69 @@ async def pdf_generate_all_pages(
     regen_queue = asyncio.Queue()
     _register_pdf_regen_queue(chat_id, regen_queue, pages, page_status)
 
-    async def _do_generate(page_num, img, slot):
+    async def _do_generate(page_num, img, slot, idx=None):
         _current_job_chat_id_ctx.set(chat_id)
         mcqs = []
+        # PAGE-STALL GUARD (2026-11-20, user request, mirrors /qbm's guard):
+        # /pdf had NO timeout at all on generate_mcq_from_image -- a hung
+        # key/API call could block a page (and the whole job) indefinitely
+        # with no model-switch ever shown on the dashboard. Now: primary
+        # model gets 60s; on timeout, abandon it and retry the SAME page
+        # forcing gemini-3.5-flash-lite (separate quota bucket) with a
+        # 120s window; if that also stalls, give up on this page (skip).
+        # Max 3 min/page total. Dashboard "stage"/"switched_model" fields
+        # are updated AND pushed immediately (not just left for the next
+        # natural dashboard refresh) so the switch is actually visible
+        # instead of silently happening in the background.
+        _primary_task = asyncio.ensure_future(
+            generate_mcq_from_image(img, topic, page_num, mcq_count, key_offset=slot)
+        )
         try:
-            mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count, key_offset=slot)
+            mcqs = await asyncio.wait_for(_primary_task, timeout=60)
         except asyncio.CancelledError:
             raise
+        except asyncio.TimeoutError:
+            logger.warning(f"[PDF Generate] page {page_num} timed out after 60s on primary model — retrying with gemini-3.5-flash-lite")
+            _primary_task.cancel()
+            try:
+                await _primary_task
+            except Exception:
+                pass
+            if idx is not None:
+                page_status[idx]["stage"] = "🔁 1min stall — gemini-3.5-flash-lite দিয়ে retry হচ্ছে..."
+                page_status[idx]["switched_model"] = True
+                if status_msg_id:
+                    _spawn_task(_update_pdf_dashboard(chat_id, status_msg_id,
+                        file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0,
+                        ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id),
+                        reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status)))
+            try:
+                await send_msg(chat_id, f"⏱️ Page {page_num}: 1 minute-এও শেষ হয়নি — gemini-3.5-flash-lite দিয়ে আবার চেষ্টা করছি।")
+            except Exception:
+                pass
+            _tok = _qbm_forced_start_model_ctx.set("gemini-3.5-flash-lite")
+            try:
+                _retry_task = asyncio.ensure_future(
+                    generate_mcq_from_image(img, topic, page_num, mcq_count, key_offset=slot)
+                )
+                try:
+                    mcqs = await asyncio.wait_for(_retry_task, timeout=120)
+                except asyncio.CancelledError:
+                    raise
+                except asyncio.TimeoutError:
+                    logger.warning(f"[PDF Generate] page {page_num} ALSO timed out after 120s on gemini-3.5-flash-lite — skipping, moving to next page")
+                    _retry_task.cancel()
+                    try:
+                        await _retry_task
+                    except Exception:
+                        pass
+                    mcqs = []
+                    try:
+                        await send_msg(chat_id, f"⏱️ Page {page_num}: flash-lite-তেও শেষ হয়নি (দুটো মডেলই hang) — skip করে পরের page-এ যাচ্ছি।")
+                    except Exception:
+                        pass
+            finally:
+                _qbm_forced_start_model_ctx.reset(_tok)
         except Exception as e:
             logger.error(f"[PDF Generate] Page {page_num} error: {e}; retrying once")
 
@@ -20465,7 +20521,7 @@ async def pdf_generate_all_pages(
                         ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id),
                         reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
 
-            mcqs = await _do_generate(page_num, img, slot)
+            mcqs = await _do_generate(page_num, img, slot, idx=idx)
 
             if is_cancelled(chat_id):
                 return
@@ -20508,7 +20564,7 @@ async def pdf_generate_all_pages(
                             file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0,
                             ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id),
                             reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
-                new_mcqs = await _do_generate(r_page_num, r_img, slot)
+                new_mcqs = await _do_generate(r_page_num, r_img, slot, idx=regen_idx)
                 if is_cancelled(chat_id):
                     break
                 async with lock:
