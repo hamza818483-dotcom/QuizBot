@@ -39319,10 +39319,33 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 # webhook so none of them can be GC'd before completion.
 _BACKGROUND_TASKS = set()
 
+def _spawn_task_error_cb(task: asyncio.Task):
+    """Fix (2026-11-21, user-reported 'PDF পাঠালে bot no response'): every
+    command (/rqb, /qbm, /topic, /pdf, etc.) is actually run via
+    _spawn_task/_spawn_command_task as a fire-and-forget asyncio.Task. Before
+    this fix, an exception raised inside one of these tasks (e.g. a bad PDF
+    triggering an unhandled crash deep in the extraction pipeline) was NEVER
+    surfaced anywhere except asyncio's default "Task exception was never
+    retrieved" stderr log -- no message to the user, no owner alert. From the
+    user's side the bot just goes silent on that file. This callback runs for
+    EVERY background task on completion and, if it died with an exception,
+    logs it properly and alerts the owner so these no longer vanish."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(f"[SpawnTask] Unhandled task exception: {exc}", exc_info=exc)
+        # Plain create_task (not _spawn_task) -- avoids re-attaching this same
+        # callback to itself and risking a notify-failure feedback loop.
+        _owner_task = asyncio.create_task(notify_owner(f"🚨 Background task crashed:\n{exc}"[:4000]))
+        _owner_task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+
 def _spawn_task(coro):
     task = asyncio.create_task(coro)
     _BACKGROUND_TASKS.add(task)
     task.add_done_callback(_BACKGROUND_TASKS.discard)
+    task.add_done_callback(_spawn_task_error_cb)
     return task
 
 # Per-user command queue — same user firing a command again while a previous
@@ -39422,7 +39445,19 @@ async def _drain_user_queue(uid: int):
             if task is not None and not task.done():
                 await asyncio.gather(task, return_exceptions=True)
         except Exception as e:
-            logger.error(f"[Queue] uid={uid} command error: {e}")
+            logger.error(f"[Queue] uid={uid} command error: {e}", exc_info=True)
+            # Fix (2026-11-21, user-reported "PDF পাঠালে bot no response"):
+            # this except silently swallowed the error with only a log line --
+            # the user saw NOTHING (no error message, no retry hint), looked
+            # exactly like the bot had frozen/ignored their file. Any uncaught
+            # exception inside handle_message (PDF/document path included) now
+            # also tells the user plainly instead of going dark.
+            _cid = update.get("message", {}).get("chat", {}).get("id")
+            if _cid:
+                try:
+                    await _safe_error_reply(_cid, e, context=f"queue uid={uid}")
+                except Exception:
+                    pass
         finally:
             _LOCK_ACQUIRED_AT.pop(uid, None)
             _USER_RUNNING_COMMAND.pop(uid, None)
@@ -39599,8 +39634,19 @@ async def process_update(update: dict):
             if chat_id_r and user_id_r:
                 _spawn_task(maybe_approve_join_request(chat_id_r, user_id_r))
     except Exception as e:
-        logger.error(f"[Update] Error: {e}")
+        logger.error(f"[Update] Error: {e}", exc_info=True)
         await notify_owner(f"[Update] Unhandled error:\n{str(e)[:500]}")
+        # Fix (2026-11-21): same silent-failure issue as the queue worker --
+        # this top-level catch (covers queue-exempt fast-path commands and
+        # the no-uid branch) only notified the owner, never the user. A PDF/
+        # document sent through one of these paths that threw would leave
+        # the sender with zero response.
+        _cid2 = update.get("message", {}).get("chat", {}).get("id")
+        if _cid2:
+            try:
+                await _safe_error_reply(_cid2, e, context="process_update")
+            except Exception:
+                pass
 
 # ============================================================
 # MESSAGE HANDLER
