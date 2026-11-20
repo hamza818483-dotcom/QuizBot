@@ -35297,7 +35297,7 @@ async def qbm_extract_all_pages(
     _qbm_last_edit_ts = [0.0]
     _live_active_topic = [""]
 
-    async def _qbm_safe_dash_edit():
+    async def _qbm_safe_dash_edit(force=False):
         # Serialize every dashboard edit (page-start, page-done, ticker) —
         # WINDOW=4 pages finishing concurrently used to fire edit_msg calls
         # in parallel on the SAME status_msg_id with no ordering guarantee,
@@ -35306,6 +35306,15 @@ async def qbm_extract_all_pages(
         # completed pages silently vanish from the live status. Skip the
         # call entirely when the text is unchanged (avoids Telegram's
         # "message is not modified" error burning a request for nothing).
+        #
+        # force=True (2026-11-20, bug found: model-switch stall notice was
+        # being silently dropped by the throttle below when it landed within
+        # 0.9s of another page's concurrent edit -- it never retried, so the
+        # switch could vanish from the dashboard without ever being shown).
+        # Use force=True for events the user must see at least once (the
+        # stall -> model-switch notice), bypassing the rate-throttle (the
+        # text-unchanged short-circuit still applies, since there's nothing
+        # to show if nothing changed).
         async with _qbm_dash_lock:
             if is_cancelled(chat_id):
                 # Belt-and-suspenders: every caller of this function (ticker,
@@ -35315,7 +35324,7 @@ async def qbm_extract_all_pages(
                 # text back to the live dashboard after cancel was clicked
                 # (user report 2026-11-18).
                 return
-            if strict_calls:
+            if strict_calls and not force:
                 # never edit faster than Telegram allows (burst from stage changes + ticker)
                 if time.time() - _qbm_last_edit_ts[0] < (0.9 if chat_id > 0 else 2.9):
                     return
@@ -35458,7 +35467,7 @@ async def qbm_extract_all_pages(
                 page_status[idx]["v_now"] = "🔁 1min stall — gemini-3.5-flash-lite দিয়ে retry হচ্ছে..."
                 page_status[idx]["switched_model"] = True
                 if status_msg_id:
-                    _spawn_task(_qbm_safe_dash_edit())
+                    _spawn_task(_qbm_safe_dash_edit(force=True))
                 _tok = _qbm_forced_start_model_ctx.set("gemini-3.5-flash-lite")
                 try:
                     retry_task = _spawn_task(_run_extract())
