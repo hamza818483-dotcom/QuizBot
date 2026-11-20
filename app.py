@@ -23095,6 +23095,7 @@ def _strip_explanation(prompt: str) -> str:
     return out
 
 
+QBM_EXTRACT_PROMPT_DEFAULT = _strip_explanation(QBM_EXTRACT_PROMPT_DEFAULT)
 TOPIC_EXTRACT_PROMPT = _strip_explanation(TOPIC_EXTRACT_PROMPT)
 CHEM_EXTRACT_PROMPT = _strip_explanation(CHEM_EXTRACT_PROMPT)
 UNMESH_EXTRACT_PROMPT = _strip_explanation(UNMESH_EXTRACT_PROMPT)
@@ -28311,15 +28312,9 @@ async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = False) -> l
 
         _qbm_balance_answer_with_options(mc)
 
-        if not (mc.get("explanation") or "").strip():
-            # DISABLED 2026-11-19 (user request): no AI explanation
-            # generation anywhere in /qbm, including this batch-backfill
-            # path -- deterministic bare line only, zero extra Gemini call.
-            ans = mc.get("answer", "A")
-            opt_letters = ["A", "B", "C", "D", "E"]
-            oidx = opt_letters.index(ans) if ans in opt_letters else 0
-            ans_text = opts[oidx] if oidx < len(opts) else ""
-            mc["explanation"] = f"সঠিক উত্তর: {ans} ({ans_text})" if ans_text else f"সঠিক উত্তর: {ans}"
+        # DISABLED 2026-11-20 (user request): explanation must stay
+        # completely EMPTY when missing -- no AI call, no bare "সঠিক উত্তর:
+        # X (...)" line either. Leave mc["explanation"] as-is (blank).
 
         if not mc.get("qsn_bbox") and "<img" not in mc["question"].lower() and _FIGURE_CAPTION_RE.search(mc["question"]):
             pending_bbox_idx[len(fixed)] = mc["question"]
@@ -29979,21 +29974,11 @@ Line 3: the 165-char-max Bengali explanation (omit this line entirely if Line 2 
 
 async def _qbm_build_explanation_for_known_answer(mc: dict, answer_letter: str, gemini_only: bool = False) -> str:
     """
-    DISABLED (2026-11-19, per user request): explanation generation must
-    never run for /qbm or any derived command -- no extra Gemini/Groq call,
-    zero generation cost/latency/hallucination risk. Returns a bare
-    deterministic "সঠিক উত্তর: X (...)" line built only from data already
-    in `mc`/`answer_letter`, same as the pre-df6312b behavior. This is
-    intentionally NOT a prompt-level change (mirrors the main extraction
-    prompt's "EXPLANATION: not produced in this call" rule at the
-    code/backfill level too), so no caller of this function can
-    accidentally re-introduce a generated explanation.
+    DISABLED (2026-11-20, per user request): explanation must stay
+    completely EMPTY -- no AI call, and no bare "সঠিক উত্তর: X (...)"
+    line either. All existing callers get "" and leave the field blank.
     """
-    opts = mc.get("options", [])
-    opt_letters = ["A", "B", "C", "D", "E"]
-    idx = opt_letters.index(answer_letter) if answer_letter in opt_letters else 0
-    ans_text = opts[idx] if idx < len(opts) else ""
-    return f"সঠিক উত্তর: {answer_letter} ({ans_text})" if ans_text else f"সঠিক উত্তর: {answer_letter}"
+    return ""
 
 
 async def handle_auto_command(msg: dict):
