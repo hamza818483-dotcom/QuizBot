@@ -31570,27 +31570,39 @@ async def _handle_rqb_impl(msg: dict):
 
         topic_groups = _topic_group_mcqs(extracted_pages)
 
-        if status_msg_id:
-            breakdown = "\n".join(f"📂 {name}: {len(mcqs)} MCQ" for name, mcqs in topic_groups)
-            next_step = "channel-এ poll পাঠানো হচ্ছে..." if rqb_channel_id else "CSV পাঠানো হচ্ছে..."
-            await edit_msg(chat_id, status_msg_id,
-                f"✅ Extraction Complete!\n📝 Total MCQ: {total_mcq_found} | 📂 Topics: {len(topic_groups)}\n\n{breakdown}\n\n⏳ {next_step}")
+        # Fix (2026-11-21, user request): the live page-wise extraction
+        # dashboard (status_msg_id) must stay exactly as it was -- it is NO
+        # LONGER edited into a "Complete"/breakdown message here. All
+        # follow-up messages (the completion summary, each topic CSV, and
+        # the merged CSV) now reply to this dashboard message instead, so
+        # the whole exchange reads as: [live dashboard, untouched] -> reply
+        # -> [complete summary] -> reply -> [CSVs...].
+        _reply_target_id = status_msg_id or msg.get("message_id")
 
         if rqb_channel_id:
             total_polls = await _post_topic_groups_to_channel(rqb_channel_id, topic_groups, rqb_thread_id)
-            if status_msg_id:
-                _pm_breakdown = _build_page_model_breakdown(_rqb_page_status_out)
-                await edit_msg(chat_id, status_msg_id,
-                    "✅ <b>RQB Extraction Complete!</b>\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━\n"
-                    + (f"{_pm_breakdown}\n━━━━━━━━━━━━━━━━━━━━━━\n" if _pm_breakdown else "")
-                    + f"📝 মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে {total_polls}টি poll channel-এ পাঠানো হয়েছে।")
+            _pm_breakdown = _build_page_model_breakdown(_rqb_page_status_out)
+            await send_msg(chat_id,
+                "✅ <b>RQB Extraction Complete!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                + (f"{_pm_breakdown}\n━━━━━━━━━━━━━━━━━━━━━━\n" if _pm_breakdown else "")
+                + f"📝 মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে {total_polls}টি poll channel-এ পাঠানো হয়েছে।",
+                reply_to_message_id=_reply_target_id)
             return
+
+        _pm_breakdown = _build_page_model_breakdown(_rqb_page_status_out)
+        _complete_r = await send_msg(chat_id,
+            "✅ <b>RQB Extraction Complete!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            + (f"{_pm_breakdown}\n━━━━━━━━━━━━━━━━━━━━━━\n" if _pm_breakdown else "")
+            + f"📝 মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।",
+            reply_to_message_id=_reply_target_id)
+        _complete_msg_id = _complete_r.get("result", {}).get("message_id") if _complete_r.get("ok") else _reply_target_id
 
         _ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
         import io as _io_rqb, csv as _csv_rqb
         _running_count = 0
-        _cmd_msg_id = msg.get("message_id")
+        _cmd_msg_id = _complete_msg_id
         _merged_buf = _io_rqb.StringIO()
         _merged_w = _csv_rqb.writer(_merged_buf)
         _merged_w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
@@ -31643,14 +31655,6 @@ async def _handle_rqb_impl(msg: dict):
                          f"💎 Total MCQ: {total_mcq_found}"),
                 mime_type="text/csv",
                 reply_to_message_id=_cmd_msg_id)
-
-        if status_msg_id:
-            _pm_breakdown = _build_page_model_breakdown(_rqb_page_status_out)
-            await edit_msg(chat_id, status_msg_id,
-                "✅ <b>RQB Extraction Complete!</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                + (f"{_pm_breakdown}\n━━━━━━━━━━━━━━━━━━━━━━\n" if _pm_breakdown else "")
-                + f"📝 মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।")
 
     except _DownloadCancelled:
         # 2026-11-18 (user request): download-phase Cancel pressed. The
