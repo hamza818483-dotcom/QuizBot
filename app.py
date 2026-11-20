@@ -35440,7 +35440,8 @@ async def qbm_extract_all_pages(
                 # (separate quota bucket, usually unaffected when
                 # gemini-3.6-flash is the one hanging) instead of giving up
                 # outright (user request 2026-11-19, timeout lowered to 60s
-                # 2026-11-20).
+                # 2026-11-20, flash-lite retry window raised to 120s same
+                # day -- primary 60s + flash-lite 120s = 3 min max per page).
                 mcqs = await asyncio.wait_for(ex_task, timeout=60)
             except asyncio.CancelledError:
                 mcqs = []
@@ -35473,13 +35474,13 @@ async def qbm_extract_all_pages(
                     retry_task = _spawn_task(_run_extract())
                     retry_watcher = _spawn_task(_watch_cancel_inner(retry_task))
                     try:
-                        mcqs = await asyncio.wait_for(retry_task, timeout=60)
+                        mcqs = await asyncio.wait_for(retry_task, timeout=120)
                     except asyncio.CancelledError:
                         mcqs = []
                     except asyncio.TimeoutError:
                         # flash-lite also stalled out -- now actually give up
                         # on this page rather than blocking the job forever.
-                        logger.warning(f"[QBM] page {page_num} ALSO timed out after 60s on gemini-3.5-flash-lite — skipping, moving to next page")
+                        logger.warning(f"[QBM] page {page_num} ALSO timed out after 120s on gemini-3.5-flash-lite — skipping, moving to next page")
                         retry_task.cancel()
                         try:
                             await retry_task
