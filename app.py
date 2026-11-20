@@ -1015,6 +1015,39 @@ def _wrap_dl_progress_cb(chat_id, status_msg_id, inner_cb):
     return _wrapped
 
 
+def _dlbar(pct: int) -> str:
+    filled = pct // 10
+    return "█" * filled + "░" * (10 - filled)
+
+
+def _make_pdf_dl_progress_cb(chat_id, status_msg_id, file_name: str = None, min_step: int = 5):
+    """Shared %-bar progress_cb for plain 'PDF download হচ্ছে...' status
+    messages that previously had no bar at all (inner_cb=None sites).
+    Edits status_msg_id in place as [bar pct%], throttled to min_step%,
+    and keeps the existing Cancel button. Returns an async callable
+    suitable as the `inner_cb` of _wrap_dl_progress_cb, or None if
+    status_msg_id is falsy."""
+    if not status_msg_id:
+        return None
+    label = f"⏳ PDF download হচ্ছে...\n📄 {file_name}" if file_name else "⏳ PDF download হচ্ছে..."
+    _last = {"v": -1}
+
+    async def _cb(done, total):
+        if not total:
+            return
+        pct = int(done * 100 / total)
+        if pct == _last["v"] or (pct - _last["v"] < min_step and pct != 100):
+            return
+        _last["v"] = pct
+        try:
+            await edit_msg(chat_id, status_msg_id, f"{label}\n[{_dlbar(pct)} {pct}%]",
+                           reply_markup=_dlcancel_kb(chat_id, status_msg_id))
+        except Exception:
+            pass
+
+    return _cb
+
+
 async def _dl_cancel_delete_msg(chat_id, status_msg_id):
     """Call ONLY from the dlcancel_ callback handler, right after setting
     the flag. Per explicit user preference (2026-11-18): the message must
@@ -19138,7 +19171,8 @@ async def _handle_dagano_impl(msg: dict):
     if status_msg_id:
         _spawn_task(edit_msg(chat_id, status_msg_id, "⏳ PDF download হচ্ছে...",
                              reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
-    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, None) if status_msg_id else None
+    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id,
+        _make_pdf_dl_progress_cb(chat_id, status_msg_id)) if status_msg_id else None
 
     try:
         pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_cb_wrapped, chat_id=chat_id,
@@ -19591,7 +19625,8 @@ async def _handle_extra_impl(msg: dict):
     if status_msg_id:
         _spawn_task(edit_msg(chat_id, status_msg_id, "⏳ PDF download হচ্ছে...",
                              reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
-    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, None) if status_msg_id else None
+    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id,
+        _make_pdf_dl_progress_cb(chat_id, status_msg_id)) if status_msg_id else None
 
     try:
         pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_cb_wrapped, chat_id=chat_id,
@@ -31157,7 +31192,8 @@ async def _handle_topic_impl(msg: dict):
     if status_msg_id:
         _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}",
                              reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
-    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, None) if status_msg_id else None
+    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id,
+        _make_pdf_dl_progress_cb(chat_id, status_msg_id, file_name)) if status_msg_id else None
 
     try:
         pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_cb_wrapped, chat_id=chat_id,
@@ -31346,7 +31382,8 @@ async def _handle_eng_impl(msg: dict):
     if status_msg_id:
         _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}",
                              reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
-    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, None) if status_msg_id else None
+    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id,
+        _make_pdf_dl_progress_cb(chat_id, status_msg_id, file_name)) if status_msg_id else None
 
     try:
         pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_cb_wrapped, chat_id=chat_id,
@@ -31538,7 +31575,8 @@ async def _handle_rqb_impl(msg: dict):
     if status_msg_id:
         _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}",
                              reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
-    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, None) if status_msg_id else None
+    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id,
+        _make_pdf_dl_progress_cb(chat_id, status_msg_id, file_name)) if status_msg_id else None
 
     try:
         pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_cb_wrapped, chat_id=chat_id,
@@ -31737,7 +31775,8 @@ async def handle_biot(msg: dict):
     if status_msg_id:
         _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}",
                              reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
-    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, None) if status_msg_id else None
+    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id,
+        _make_pdf_dl_progress_cb(chat_id, status_msg_id, file_name)) if status_msg_id else None
 
     try:
         pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_cb_wrapped, chat_id=chat_id,
@@ -31852,7 +31891,8 @@ async def _handle_bio_impl(msg: dict):
     if status_msg_id:
         _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}",
                              reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
-    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, None) if status_msg_id else None
+    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id,
+        _make_pdf_dl_progress_cb(chat_id, status_msg_id, file_name)) if status_msg_id else None
 
     try:
         pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_cb_wrapped, chat_id=chat_id,
@@ -32039,7 +32079,8 @@ async def _handle_unmesh_impl(msg: dict):
     if status_msg_id and not _is_cache_hit:
         _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}",
                              reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
-    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, None) if status_msg_id else None
+    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id,
+        _make_pdf_dl_progress_cb(chat_id, status_msg_id, file_name)) if status_msg_id else None
 
     try:
         pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_cb_wrapped, chat_id=chat_id,
@@ -32255,7 +32296,8 @@ async def _handle_bcs_impl(msg: dict):
     if status_msg_id and not _is_cache_hit:
         _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}",
                              reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
-    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, None) if status_msg_id else None
+    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id,
+        _make_pdf_dl_progress_cb(chat_id, status_msg_id, file_name)) if status_msg_id else None
 
     try:
         pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_cb_wrapped, chat_id=chat_id,
@@ -32479,7 +32521,8 @@ async def handle_chemt(msg: dict):
     if status_msg_id:
         _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}",
                              reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
-    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, None) if status_msg_id else None
+    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id,
+        _make_pdf_dl_progress_cb(chat_id, status_msg_id, file_name)) if status_msg_id else None
 
     try:
         pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_cb_wrapped, chat_id=chat_id,
@@ -32596,7 +32639,8 @@ async def _handle_chem_impl(msg: dict):
     if status_msg_id:
         _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}",
                              reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
-    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, None) if status_msg_id else None
+    _dl_cb_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id,
+        _make_pdf_dl_progress_cb(chat_id, status_msg_id, file_name)) if status_msg_id else None
 
     try:
         pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_cb_wrapped, chat_id=chat_id,
