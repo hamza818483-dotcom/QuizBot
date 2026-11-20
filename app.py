@@ -20152,11 +20152,11 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
                 _g_att = s.get("gemini_attempt")
                 acct_str = f" 🔑{_g_acct}#{_g_att}" if _g_acct else ""
                 _g_accts2 = s.get("gemini_accounts")
-                _g_keytries = s.get("gemini_key_attempts")
-                if _g_accts2 or _g_keytries:
+                _g_serial = s.get("gemini_key_serial")
+                if _g_accts2 or _g_serial:
                     _accts_part = f"👤{_g_accts2}" if _g_accts2 else ""
-                    _tries_part = f" 🔑x{_g_keytries}" if _g_keytries else ""
-                    acct_str += f" [{_accts_part}{_tries_part}]"
+                    _serial_part = f" 🔑#{_g_serial}" if _g_serial else ""
+                    acct_str += f" [{_accts_part}{_serial_part}]"
                 lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ{model_str}{topic_str}{secs_str}{calls_str}{acct_str} ✓")
         elif s["current"]:
             _stage = s.get("stage") or "Processing..."
@@ -28617,9 +28617,12 @@ async def _qbm_gemini_raw_only(img, prompt: str, careful: bool = False) -> str:
                 _used = _qbm_page_used_accounts_ctx.get()
                 if _used is not None:
                     _used.add(key_rotator.account_of(key))
+                _qka_s = _QBM_PAGE_KEY_ATTEMPTS_CTX.get()
+                if _qka_s is not None:
+                    _qka_s["last_serial"] = key_rotator.serial_of(key)
                 try:
                     from pdf_handler import _gemini_key_hash, _last_gemini_success_ctx
-                    logger.info(f"[QBM Gemini] success — account={key_rotator.account_of(key)} key={_gemini_key_hash(key)}")
+                    logger.info(f"[QBM Gemini] success — account={key_rotator.account_of(key)} key={_gemini_key_hash(key)} serial=#{key_rotator.serial_of(key)}")
                     # 2026-11-18 (caption fix): record which model actually
                     # won this call on the same shared contextvar /pdf and
                     # /img already use, so the CSV caption can report it
@@ -28925,13 +28928,16 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 _used_set = _qbm_page_used_accounts_ctx.get()
                 if _used_set is not None:
                     _used_set.add(_used_acct)
+                _qka_m = _QBM_PAGE_KEY_ATTEMPTS_CTX.get()
+                if _qka_m is not None:
+                    _qka_m["last_serial"] = key_rotator.serial_of(key)
                 # 2026-11-16 (user request): /qbm tracked account_of(key) only
                 # internally (to avoid repeat-account retries) -- never logged
                 # or exposed which account/key actually won, unlike /pdf's
                 # pipeline (_attach_gemini_success_info). Mirror that here.
                 try:
                     from pdf_handler import _gemini_key_hash, _last_gemini_success_ctx
-                    logger.info(f"[QBM Gemini] success — account={_used_acct} key={_gemini_key_hash(key)}")
+                    logger.info(f"[QBM Gemini] success — account={_used_acct} key={_gemini_key_hash(key)} serial=#{key_rotator.serial_of(key)}")
                     _last_gemini_success_ctx.set({
                         "account": _used_acct,
                         "key_hash": _gemini_key_hash(key),
@@ -35296,6 +35302,7 @@ async def qbm_extract_all_pages(
             if _accts_used:
                 page_status[idx]["gemini_accounts"] = ", ".join(sorted(_accts_used))
             page_status[idx]["gemini_key_attempts"] = _qbm_page_key_attempts["n"]
+            page_status[idx]["gemini_key_serial"] = _qbm_page_key_attempts.get("last_serial", 0)
         except Exception:
             pass
         finally:

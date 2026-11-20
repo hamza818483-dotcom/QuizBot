@@ -547,6 +547,10 @@ class GeminiKeyRotator:
             if skipped:
                 logger.warning(f"[Gemini] Skipped {len(skipped)} previously-banned key(s) at startup: {[k[:12]+'...' for k in skipped]}")
             logger.info(f"[Gemini] Loaded {len(self.keys)} usable keys across {n_accounts} account(s) ({len(skipped)} auto-skipped as banned)")
+            # 2026-11-20 (user request): 1-based serial# matching the
+            # user's own comma-separated key order, for the /qbm live
+            # dashboard ("কোন নং key দিয়ে সফল হলো").
+            self._key_serial = {key: i + 1 for i, key in enumerate(all_keys)}
             return
         # Preferred #2: GEMINI_KEYS_GROUPED="key1@acct1,key2@acct1,key3@acct2,..."
         # explicitly tags which Google account each key belongs to, so keys
@@ -605,9 +609,18 @@ class GeminiKeyRotator:
         if skipped:
             logger.warning(f"[Gemini] Skipped {len(skipped)} previously-banned key(s) at startup: {[k[:12]+'...' for k in skipped]}")
         logger.info(f"[Gemini] Loaded {len(self.keys)} usable keys across {n_accounts} account(s) ({len(skipped)} auto-skipped as banned)")
+        # 2026-11-20 (user request): 1-based serial# matching the user's
+        # own comma-separated key order, for the /qbm live dashboard.
+        self._key_serial = {key: i + 1 for i, key in enumerate(all_keys)}
 
     def account_of(self, key: str) -> str:
         return self._key_account.get(key, key)
+
+    def serial_of(self, key: str) -> int:
+        """1-based position of this key in the user's own comma-separated
+        env-var order (across whichever branch of _load_keys loaded it) --
+        what the user means by "কত নং key". Returns 0 if unknown."""
+        return getattr(self, "_key_serial", {}).get(key, 0)
 
     def acquire_account_slot(self, key: str) -> bool:
         """Returns True and reserves a slot if this key's account is under
