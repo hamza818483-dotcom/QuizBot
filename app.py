@@ -20157,7 +20157,8 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
                     _accts_part = f"👤{_g_accts2}" if _g_accts2 else ""
                     _serial_part = f" 🔑#{_g_serial}" if _g_serial else ""
                     acct_str += f" [{_accts_part}{_serial_part}]"
-                lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ{model_str}{topic_str}{secs_str}{calls_str}{acct_str} ✓")
+                switch_str = " 🔁(flash-lite retry)" if s.get("switched_model") else ""
+                lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ{model_str}{topic_str}{secs_str}{calls_str}{acct_str}{switch_str} ✓")
         elif s["current"]:
             _stage = s.get("stage") or "Processing..."
             _pg_start = s.get("page_start_time")
@@ -35102,6 +35103,13 @@ async def qbm_extract_all_pages(
                     await send_msg(chat_id, f"⏱️ Page {page_num}: 2 minute-এও শেষ হয়নি — gemini-3.5-flash-lite দিয়ে আবার চেষ্টা করছি।")
                 except Exception:
                     pass
+                # 2026-11-20 (user request): live dashboard should also show
+                # this switch while the retry is in flight, not just via the
+                # Telegram message above.
+                page_status[idx]["stage"] = "🔁 2min stall — gemini-3.5-flash-lite দিয়ে retry হচ্ছে..."
+                page_status[idx]["switched_model"] = True
+                if status_msg_id:
+                    _spawn_task(_qbm_safe_dash_edit())
                 _tok = _qbm_forced_start_model_ctx.set("gemini-3.5-flash-lite")
                 try:
                     retry_task = _spawn_task(_run_extract())
@@ -35120,6 +35128,7 @@ async def qbm_extract_all_pages(
                         except Exception:
                             pass
                         mcqs = []
+                        page_status[idx]["switched_model"] = False
                         try:
                             await send_msg(chat_id, f"⏱️ Page {page_num}: flash-lite-তেও শেষ হয়নি (দুটো মডেলই hang) — skip করে পরের page-এ যাচ্ছি।")
                         except Exception:
