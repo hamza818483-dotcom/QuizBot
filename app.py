@@ -31617,6 +31617,55 @@ async def _handle_rqb_impl(msg: dict):
         )
 
         total_mcq_found = sum(len(mcqs) for _, _, mcqs in extracted_pages)
+
+        # 2026-11-21 (user request): same fix as /qbm -- cancel pressed
+        # mid-extraction used to fall straight through into the topic-
+        # grouping / CSV-posting code below with no cancel check at all,
+        # so a partially-finished /rqb job silently produced its full
+        # normal output (or, if total_mcq_found was 0, just the generic
+        # "কোনো MCQ পাওয়া যায়নি" message) instead of a cancel notice +
+        # partial CSV. Mirrors /qbm's short-circuit: whatever got
+        # extracted before Cancel was hit goes out as topic-grouped CSVs
+        # right now, independent of anything below.
+        if is_cancelled(chat_id):
+            if total_mcq_found:
+                topic_groups = _topic_group_mcqs(extracted_pages)
+                _ans_map_rc = {"A": "1", "B": "2", "C": "3", "D": "4"}
+                import io as _io_rc, csv as _csv_rc
+                _cancel_r = await send_msg(chat_id,
+                    f"🛑 Cancel করা হয়েছে — ততক্ষণে extract হওয়া {total_mcq_found} MCQ "
+                    f"({len(topic_groups)}টি টপিক) CSV আকারে পাঠানো হলো।",
+                    reply_to_message_id=status_msg_id)
+                _cancel_msg_id = _cancel_r.get("result", {}).get("message_id") if _cancel_r.get("ok") else status_msg_id
+                for name, mcqs in topic_groups:
+                    buf_rc = _io_rc.StringIO()
+                    w_rc = _csv_rc.writer(buf_rc)
+                    w_rc.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
+                                    "answer", "explanation", "type", "section"])
+                    for m in mcqs:
+                        opts = m.get("options", ["", "", "", ""])
+                        w_rc.writerow([
+                            m.get("question", ""), opts[0] if len(opts) > 0 else "",
+                            opts[1] if len(opts) > 1 else "", opts[2] if len(opts) > 2 else "",
+                            opts[3] if len(opts) > 3 else "", opts[4] if len(opts) > 4 else "",
+                            _ans_map_rc.get(m.get("answer", "A"), "1"),
+                            _strip_img_tag(m.get("explanation", "")), "1", "1"
+                        ])
+                    _num_rc, _bn_name_rc = _split_topic_number_and_bangla_name(name)
+                    safe_name_rc = re.sub(r'[\\/:*?"<>|]', '_', _bn_name_rc).strip() or "Topic"
+                    await send_document(chat_id, buf_rc.getvalue().encode("utf-8"),
+                        f"{safe_name_rc}_cancelled.csv",
+                        caption=f"🛑 Cancel — {_html_escape(_bn_name_rc)} ({len(mcqs)} MCQ)",
+                        mime_type="text/csv",
+                        reply_to_message_id=_cancel_msg_id)
+            else:
+                await send_msg(chat_id,
+                    "✅ Cancel করা হয়েছে — তখনো কোনো page সম্পূর্ণ extract হয়নি "
+                    "(cancel করলে চলমান page-এর কাজ সাথে সাথে বাতিল হয়ে যায়), "
+                    "তাই পাঠানোর মতো কোনো CSV নেই।",
+                    reply_to_message_id=status_msg_id)
+            return
+
         if not total_mcq_found:
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id, "❌ কোনো MCQ পাওয়া যায়নি!")
