@@ -30646,12 +30646,8 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
             # channel_id/channel-list state.
             total_mcq_found = sum(len(mcqs) for _, _, mcqs in extracted_pages)
             if total_mcq_found:
-                _missing_exp_cancel = [m for _, _, mcqs in extracted_pages for m in mcqs if not (m.get("explanation") or "").strip()]
-                if _missing_exp_cancel:
-                    try:
-                        await _ai_generate_all_explanations(_missing_exp_cancel)
-                    except Exception as e:
-                        logger.warning(f"[QBM] cancel-path fallback explanation fill failed: {e}")
+                # DISABLED 2026-11-19 (user request): no AI explanation
+                # generation anywhere in /qbm, cancel-path included.
                 import io as _io_qc, csv as _csv_qc
                 _buf_qc = _io_qc.StringIO()
                 _w_qc = _csv_qc.writer(_buf_qc)
@@ -30673,7 +30669,7 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
                     caption=f"🛑 Cancel করা হয়েছে — ততক্ষণে extract হওয়া {total_mcq_found} MCQ CSV আকারে পাঠানো হলো।",
                     mime_type="text/csv")
             else:
-                await send_msg(chat_id, "🛑 Cancel করা হয়েছে — কোনো MCQ এখনও extract হয়নি, তাই CSV পাঠানো গেলো না।")
+                await send_msg(chat_id, "✅Cancelled", reply_to_message_id=status_msg_id)
             return
 
         if not channel_id:
@@ -30707,12 +30703,8 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
             # "📋 Channel List" button থাকবে -- চাপলে তখন actual channel
             # buttons (2 per row) reveal হবে সেই একই CSV message-এ edit করে।
             if total_mcq_found:
-                _missing_exp_qbm = [m for _, _, mcqs in extracted_pages for m in mcqs if not (m.get("explanation") or "").strip()]
-                if _missing_exp_qbm:
-                    try:
-                        await _ai_generate_all_explanations(_missing_exp_qbm)
-                    except Exception as e:
-                        logger.warning(f"[QBM] fallback explanation fill failed: {e}")
+                # DISABLED 2026-11-19 (user request): no AI explanation
+                # generation anywhere in /qbm.
                 import io as _io_qbm, csv as _csv_mod_qbm
                 _buf_qbm = _io_qbm.StringIO()
                 _w_qbm = _csv_mod_qbm.writer(_buf_qbm)
@@ -30745,7 +30737,7 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
             # now handles EVERY cancel case (0 MCQ or partial), so this
             # elif is dead but left in place as a harmless fallback.
             elif is_cancelled(chat_id):
-                await send_msg(chat_id, "🛑 Cancel করা হয়েছে — কোনো MCQ এখনও extract হয়নি, তাই CSV পাঠানো গেলো না।")
+                await send_msg(chat_id, "✅Cancelled", reply_to_message_id=status_msg_id)
             return
 
 
