@@ -20467,10 +20467,16 @@ async def pdf_generate_all_pages(
     # model-switch stall notice right after it appeared (user report
     # 2026-11-20).
     _pdf_dash_lock = asyncio.Lock()
-    _orig_update_pdf_dashboard = _update_pdf_dashboard
-    async def _update_pdf_dashboard(*a, **kw):
+    # NOTE: do not reassign the name `_update_pdf_dashboard` anywhere in this
+    # function body (via `def` or `=`) -- doing so makes Python treat that
+    # name as local for the WHOLE function, so even the read of the
+    # module-level original above such a line raises UnboundLocalError.
+    # Keep the module-level function under its own name and expose the
+    # locked wrapper under a distinct local name; call sites below were
+    # updated to call this wrapper instead of `_update_pdf_dashboard`.
+    async def _update_pdf_dashboard_locked(*a, **kw):
         async with _pdf_dash_lock:
-            return await _orig_update_pdf_dashboard(*a, **kw)
+            return await _update_pdf_dashboard(*a, **kw)
 
     # PAGE-BUTTON REGEN QUEUE: while processing is live, the dashboard shows
     # a per-page inline button under each ✅ Done page. Clicking it does NOT
@@ -20515,7 +20521,7 @@ async def pdf_generate_all_pages(
                 page_status[idx]["stage"] = "🔁 1min stall — gemini-3.5-flash-lite দিয়ে retry হচ্ছে..."
                 page_status[idx]["switched_model"] = True
                 if status_msg_id:
-                    _spawn_task(_update_pdf_dashboard(chat_id, status_msg_id,
+                    _spawn_task(_update_pdf_dashboard_locked(chat_id, status_msg_id,
                         file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0,
                         ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id),
                         reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status)))
@@ -20601,7 +20607,7 @@ async def pdf_generate_all_pages(
                 _slot_counter["n"] += 1
                 page_status[idx]["current"] = True
                 if status_msg_id:
-                    await _update_pdf_dashboard(chat_id, status_msg_id,
+                    await _update_pdf_dashboard_locked(chat_id, status_msg_id,
                         file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0,
                         ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id),
                         reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
@@ -20624,7 +20630,7 @@ async def pdf_generate_all_pages(
                     page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
                 _attach_gemini_success_info(page_status[idx], mcqs, page_num)
                 if status_msg_id:
-                    await _update_pdf_dashboard(chat_id, status_msg_id,
+                    await _update_pdf_dashboard_locked(chat_id, status_msg_id,
                         file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0,
                         ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id),
                         reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
@@ -20645,7 +20651,7 @@ async def pdf_generate_all_pages(
                     page_status[regen_idx]["current"] = True
                     page_status[regen_idx]["done"] = False
                     if status_msg_id:
-                        await _update_pdf_dashboard(chat_id, status_msg_id,
+                        await _update_pdf_dashboard_locked(chat_id, status_msg_id,
                             file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0,
                             ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id),
                             reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
@@ -20660,7 +20666,7 @@ async def pdf_generate_all_pages(
                     page_status[regen_idx]["done"] = True
                     page_status[regen_idx]["mcq"] = len(new_mcqs)
                     if status_msg_id:
-                        await _update_pdf_dashboard(chat_id, status_msg_id,
+                        await _update_pdf_dashboard_locked(chat_id, status_msg_id,
                             file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0,
                             ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id),
                             reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
@@ -20694,7 +20700,7 @@ async def pdf_generate_all_pages(
                 break
             if status_msg_id:
                 try:
-                    await _update_pdf_dashboard(chat_id, status_msg_id,
+                    await _update_pdf_dashboard_locked(chat_id, status_msg_id,
                         file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0,
                         ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id),
                         reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
