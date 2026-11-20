@@ -654,7 +654,8 @@ async function handleTgProxy(request, url) {
     const resp = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
       method: 'POST',
       headers: { 'Content-Type': contentType },
-      body: body
+      body: body,
+      signal: AbortSignal.timeout(15000)
     });
     const result = await resp.text();
     return new Response(result, {
@@ -662,7 +663,8 @@ async function handleTgProxy(request, url) {
       headers: { 'Content-Type': 'application/json' }
     });
   } catch (e) {
-    return jsonResp({ ok: false, error: e.message }, 500);
+    const isTimeout = e.name === 'TimeoutError' || e.name === 'AbortError';
+    return jsonResp({ ok: false, error: (isTimeout ? 'Telegram API timeout: ' : '') + e.message }, isTimeout ? 504 : 500);
   }
 }
 
