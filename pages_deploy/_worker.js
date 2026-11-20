@@ -660,6 +660,12 @@ async function handleTgProxy(request, url) {
     // times out, retry once forcing a direct connection to Telegram's
     // secondary IP range (149.154.167.0/24) in case the primary range
     // (149.154.166.0/24) is the one with the bad route.
+    // 2026-11-21 (regression found): the timeout here was originally 15s,
+    // then tightened to 12s -- but the routing issue is often just SLOW
+    // (not dead), so requests that would have eventually succeeded were
+    // being aborted before completion, turning a slow-but-working call into
+    // a hard failure. Raised to 25s per attempt so a genuinely slow (but
+    // alive) route still gets a chance to finish instead of being cut off.
     async function tgFetch(ipOverride) {
       const fetchUrl = ipOverride
         ? `https://api.telegram.org/bot${token}/${method}`
@@ -668,7 +674,7 @@ async function handleTgProxy(request, url) {
         method: 'POST',
         headers: { 'Content-Type': contentType },
         body: body,
-        signal: AbortSignal.timeout(12000)
+        signal: AbortSignal.timeout(25000)
       };
       if (ipOverride) {
         opts.cf = { resolveOverride: ipOverride };
@@ -787,8 +793,12 @@ async function handleTgSendDoc(request) {
     // then logged an empty-message error and fell through to a dead direct
     // path (api.telegram.org unreachable from HF). Wrap the actual TG call
     // in the same timeout+retry pattern used for tg-proxy.
+    // 2026-11-21: same 25s reasoning as handleTgProxy above -- a too-tight
+    // timeout turns a slow-but-eventually-successful route into a hard
+    // failure. Document uploads also carry more bytes than a plain API
+    // call, so they need at least as much headroom.
     async function sendDocToTelegram(fetchUrl, opts, ipOverride) {
-      const finalOpts = { ...opts, signal: AbortSignal.timeout(20000) };
+      const finalOpts = { ...opts, signal: AbortSignal.timeout(25000) };
       if (ipOverride) finalOpts.cf = { resolveOverride: ipOverride };
       return await fetch(fetchUrl, finalOpts);
     }
