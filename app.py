@@ -35474,8 +35474,8 @@ async def qbm_extract_all_pages(
                     pass
                 try:
                     await send_msg(chat_id, f"⏱️ Page {page_num}: 1 minute-এও শেষ হয়নি — gemini-3.5-flash-lite দিয়ে আবার চেষ্টা করছি।")
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.warning(f"[QBM] stall-switch DM notice send_msg failed for page {page_num}: {_e}")
                 # 2026-11-20 (user request): live dashboard should also show
                 # this switch while the retry is in flight, not just via the
                 # Telegram message above. Must set BOTH fields -- "stage" is
