@@ -23310,6 +23310,7 @@ RQB_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     '  d) Every MCQ under the same closest-bar on this page must get the EXACT SAME topic_hint string, character-for-character.\n\n'
     'OUTPUT ORDER: top-to-bottom, column-major as in the base rules above — switch columns only at genuine column boundaries, carrying topic_hint/qsn_no boundaries exactly as they occur in that reading order.\n'
     'Before finalizing output, recount: every MCQ visible on the page MUST appear exactly once in the JSON array — zero skipped, zero duplicated. IMPORTANT PRIORITY: getting every MCQ extracted (none skipped) is more important than getting the topic boundary perfectly placed — if unsure exactly where a boundary falls, still include every MCQ you can see.\n\n'
+    '🚨 MANDATORY FINAL CHECK on "topic_hint" — do this as a literal last step before you write the JSON: scan this page top-to-bottom one more time specifically for ANY solid pink/magenta/rose-filled full-width bar with white text, no matter how broad, generic, decorative-looking, or section-title-like its wording seems (page/chapter titles like "English", "Grammar Part", "Parts Of Speech" count exactly the same as a narrow sub-heading — ALL of them qualify). If this page (or the previous page/segment, carried forward) has ANY such bar anywhere above an MCQ, that MCQ\'s "topic_hint" MUST be a non-empty string — it is a bug in your own output to leave "topic_hint":"" on any MCQ while such a bar exists on or before this page. Only ever output "" if you are certain NO pink/magenta banner of any kind (not even a broad title one) has appeared anywhere in the document up to and including this MCQ.\n\n'
     'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
     '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"..."}]'
 )
@@ -23511,8 +23512,9 @@ def _build_topic_verify_prompt(mcqs: list) -> str:
         "\"correct_text\": \"<the actual text exactly as printed on the page>\"}. "
         "Only flag genuine misreads — do not flag stylistic differences.\n"
         "5) TOPIC LEAK (flag only, do not fix): does any MCQ's topic_hint in the list "
-        "above NOT match the actual full-page-width BLACK/DARK BACKGROUND banner text that "
-        "is really above it on the page? (Remember: university/organization names, চাকরি/চাকুরি, "
+        "above NOT match the actual full-page-width SOLID PINK/MAGENTA-FILLED, WHITE-TEXT "
+        "banner bar that is really (closest) above it on the page? (Remember: university/"
+        "organization names, চাকরি/চাকুরি, "
         "BUP, unit labels like বি ইউনিট are sub-headers, NEVER real topic banners — do not "
         "flag topic_hint as wrong just because a sub-header appears near it.) "
         "List any genuine mismatch as {\"qsn_no\": N, \"extracted_hint\": \"...\", \"actual_banner\": \"...\"} "
