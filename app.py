@@ -20102,16 +20102,8 @@ async def handle_pdf(msg: dict):
             page_breakdown = "\n".join(
                 f"✅ Page {fmt_page(p)}: {len(mcqs)} MCQ ✓" for p, _, mcqs in generated_pages
             )
-            # ✅ pdfch_ callback reuse — channel বাছাইয়ের পরেই With/Without
-            # Image জিজ্ঞেস করবে (আগে csvpdflist_/csvchannel_ ব্যবহার হতো,
-            # যেটাতে image option ছিলই না — এখন -c দেওয়ার ফ্লো-র সাথে একই
-            # পথ ব্যবহার করছে, যেখানে With/Without Image আগে থেকেই আছে)।
-            kb = {"inline_keyboard": []}
-            for ch in channels:
-                ch_id = ch.get("channel_id", "")
-                ch_name = ch.get("channel_name", ch_id)
-                kb["inline_keyboard"].append([{"text": f"📢 {ch_name}", "callback_data": f"pdfch_{ch_id}_{uid}"}])
-            kb["inline_keyboard"].append([{"text": "📄 CSV File Only", "callback_data": f"pdfch_csv_{uid}"}])
+            # 2026-11-22 (user request): CSV-ই যথেষ্ট — channel-select বাটনসহ
+            # আলাদা "Generation Complete" মেসেজ আর দেখানো হবে না।
             await send_msg(chat_id,
                 f"✅ <b>Generation Complete!</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -20119,8 +20111,7 @@ async def handle_pdf(msg: dict):
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"{page_breakdown}\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🎯 Topic: {topic}\n\n📢 Poll আকারে channel-এ পাঠাতে চাও?",
-                reply_markup=kb)
+                f"🎯 Topic: {topic}")
             return
 
         # ── Channel already known (-c flag) → stream per-page: ──
