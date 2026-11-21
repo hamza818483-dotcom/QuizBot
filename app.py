@@ -20483,88 +20483,83 @@ async def pdf_generate_all_pages(
     async def _do_generate(page_num, img, slot, idx=None):
         _current_job_chat_id_ctx.set(chat_id)
         mcqs = []
-        # PAGE-STALL GUARD (2026-11-20, user request, mirrors /qbm's guard):
-        # /pdf had NO timeout at all on generate_mcq_from_image -- a hung
-        # key/API call could block a page (and the whole job) indefinitely
-        # with no model-switch ever shown on the dashboard. Now: primary
-        # model gets 60s; on timeout, abandon it and retry the SAME page
-        # forcing gemini-3.5-flash-lite (separate quota bucket) with a
-        # 120s window; if that also stalls, give up on this page (skip).
-        # Max 3 min/page total. Dashboard "stage"/"switched_model" fields
-        # are updated AND pushed immediately (not just left for the next
-        # natural dashboard refresh) so the switch is actually visible
-        # instead of silently happening in the background.
-        _primary_task = asyncio.ensure_future(
-            generate_mcq_from_image(img, topic, page_num, mcq_count, key_offset=slot)
-        )
-        try:
-            mcqs = await asyncio.wait_for(_primary_task, timeout=60)
-        except asyncio.CancelledError:
-            raise
-        except asyncio.TimeoutError:
-            logger.warning(f"[PDF Generate] page {page_num} timed out after 60s on primary model — retrying with gemini-3.5-flash-lite")
-            _primary_task.cancel()
-            try:
-                await _primary_task
-            except Exception:
-                pass
+        # PAGE-STALL GUARD (2026-11-22, user request): 3-stage chain —
+        # gemini-3.6 (2min) -> gemini-3.5-flash-lite (40s) -> gemini-3.6
+        # again (40s) -> skip page, move to next. Each stage after the
+        # first uses a bumped key_offset (not the same slot) so a stuck
+        # orphaned thread from a cancelled stage (asyncio.wait_for cannot
+        # actually kill a blocking to_thread SDK call -- see bug-fix note
+        # below) never contends for the same account/key slot as the next
+        # stage's attempt. Dashboard "stage"/"switched_model" fields are
+        # pushed immediately on every switch so it's visible live.
+        def _push_stage(label):
             if idx is not None:
-                page_status[idx]["stage"] = "🔁 1min stall — gemini-3.5-flash-lite দিয়ে retry হচ্ছে..."
+                page_status[idx]["stage"] = label
                 page_status[idx]["switched_model"] = True
                 if status_msg_id:
                     _spawn_task(_update_pdf_dashboard_locked(chat_id, status_msg_id,
                         file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0,
                         ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id),
                         reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status)))
+
+        # BUG FIX (2026-11-20, user report: 9 min / only 2 Gemini requests
+        # total): a cancelled asyncio task wrapping asyncio.to_thread(
+        # _call_gemini) does NOT actually stop the blocking SDK call inside
+        # that background thread. The orphaned thread keeps running (and
+        # keeps holding its throttled_call() account/global slot, released
+        # only in _ThrottleGuard.__aexit__ once the thread itself finally
+        # returns) for up to its own SDK-level timeout. Retrying with the
+        # SAME key_offset sends the retry straight into
+        # acquire_account_slot_blocking() queued behind that still-running
+        # orphaned call, silently eating the whole retry window with zero
+        # new generateContent calls. So every stage below after the first
+        # uses a different key_offset.
+        stages = [
+            ("gemini-3.6",            slot,     120, None),
+            ("gemini-3.5-flash-lite", slot + 1, 40,  "gemini-3.5-flash-lite"),
+            ("gemini-3.6",            slot + 2, 40,  "gemini-3.6"),
+        ]
+        for i, (model_label, key_off, timeout_s, forced_model) in enumerate(stages):
+            _tok = _qbm_forced_start_model_ctx.set(forced_model) if forced_model else None
             try:
-                await send_msg(chat_id, f"⏱️ Page {page_num}: 1 minute-এও শেষ হয়নি — gemini-3.5-flash-lite দিয়ে আবার চেষ্টা করছি।")
-            except Exception:
-                pass
-            _tok = _qbm_forced_start_model_ctx.set("gemini-3.5-flash-lite")
-            try:
-                # BUG FIX (2026-11-20, user report: 9 min / only 2 Gemini
-                # requests total): _primary_task.cancel() above can NOT
-                # actually stop the real network call -- it runs inside
-                # asyncio.to_thread(_call_gemini), a blocking SDK call in a
-                # background thread that asyncio cancellation cannot touch.
-                # That orphaned thread keeps running (and keeps holding its
-                # throttled_call() account/global/distinct-account slot,
-                # only released in _ThrottleGuard.__aexit__ once the thread
-                # itself finally returns) for up to its own SDK-level
-                # timeout. Retrying with key_offset=slot (the SAME offset,
-                # so ordered_keys() picks the SAME first account) sent the
-                # retry straight into acquire_account_slot_blocking() /
-                # the global semaphore, queued behind that still-running
-                # orphaned call -- with its own 90s-per-wait internal
-                # timeout, this silently ate the entire 120s retry window
-                # (and could chain further) with zero new generateContent
-                # calls, exactly matching the logs. Offsetting the retry's
-                # key_offset moves it to a different account/key so it
-                # never contends for the slot the orphaned thread is still
-                # holding.
-                _retry_task = asyncio.ensure_future(
-                    generate_mcq_from_image(img, topic, page_num, mcq_count, key_offset=slot + 1)
+                _task = asyncio.ensure_future(
+                    generate_mcq_from_image(img, topic, page_num, mcq_count, key_offset=key_off)
                 )
                 try:
-                    mcqs = await asyncio.wait_for(_retry_task, timeout=120)
+                    mcqs = await asyncio.wait_for(_task, timeout=timeout_s)
+                    break
                 except asyncio.CancelledError:
                     raise
                 except asyncio.TimeoutError:
-                    logger.warning(f"[PDF Generate] page {page_num} ALSO timed out after 120s on gemini-3.5-flash-lite — skipping, moving to next page")
-                    _retry_task.cancel()
+                    _task.cancel()
                     try:
-                        await _retry_task
+                        await _task
                     except Exception:
                         pass
                     mcqs = []
-                    try:
-                        await send_msg(chat_id, f"⏱️ Page {page_num}: flash-lite-তেও শেষ হয়নি (দুটো মডেলই hang) — skip করে পরের page-এ যাচ্ছি।")
-                    except Exception:
-                        pass
+                    is_last = (i == len(stages) - 1)
+                    if is_last:
+                        logger.warning(f"[PDF Generate] page {page_num} timed out on ALL {len(stages)} stages ({timeout_s}s on {model_label}) — skipping, moving to next page")
+                        try:
+                            await send_msg(chat_id, f"⏱️ Page {page_num}: সব চেষ্টাতেই (3টা মডেল attempt) hang — skip করে পরের page-এ যাচ্ছি।")
+                        except Exception:
+                            pass
+                    else:
+                        next_label = stages[i + 1][0]
+                        logger.warning(f"[PDF Generate] page {page_num} timed out after {timeout_s}s on {model_label} — retrying with {next_label}")
+                        _push_stage(f"🔁 {timeout_s}s stall ({model_label}) — {next_label} দিয়ে retry হচ্ছে...")
+                        try:
+                            await send_msg(chat_id, f"⏱️ Page {page_num}: {timeout_s} sec-এও শেষ হয়নি ({model_label}) — {next_label} দিয়ে আবার চেষ্টা করছি।")
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.error(f"[PDF Generate] Page {page_num} error on {model_label}: {e}")
+                mcqs = []
             finally:
-                _qbm_forced_start_model_ctx.reset(_tok)
-        except Exception as e:
-            logger.error(f"[PDF Generate] Page {page_num} error: {e}; retrying once")
+                if _tok is not None:
+                    _qbm_forced_start_model_ctx.reset(_tok)
+            if mcqs:
+                break
 
         # Strict no-page-miss guarantee: a page landing empty (crash or
         # every provider returned nothing) gets ONE retry before being
