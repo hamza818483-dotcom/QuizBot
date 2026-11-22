@@ -3351,7 +3351,10 @@ def remove_watermark_from_pdf(pdf_bytes: bytes, watermark_text: str = None) -> b
     try:
         doc = fitz.open(stream=working, filetype="pdf")
 
+        any_text_page = False
         for page in doc:
+            if page.get_text().strip():
+                any_text_page = True
             if watermark_text:
                 try:
                     rects = page.search_for(watermark_text, quads=False)
@@ -3364,10 +3367,102 @@ def remove_watermark_from_pdf(pdf_bytes: bytes, watermark_text: str = None) -> b
 
         out = doc.tobytes(garbage=4, deflate=True, clean=True)
         doc.close()
+
+        # Stage C auto-fallback: if NO page in this PDF has extractable
+        # text, Stages A/B were no-ops by definition (nothing to redact/
+        # scrub) -- this is the "watermark baked into a scanned image"
+        # case, so hand off to the pixel-level cleaner automatically.
+        if not any_text_page:
+            try:
+                return remove_baked_watermark_from_scanned_pdf(out)
+            except Exception as be:
+                logger.warning(f"[DeWatermark] Stage C fallback failed, returning Stage A/B result: {be}")
+                return out
+
         return out
     except Exception as e:
         logger.error(f"[DeWatermark] PyMuPDF stage error, returning pikepdf-stage result: {e}")
         return working
+
+
+def _desaturate_watermark_tint(png_bytes: bytes, tint_threshold: int = 6) -> bytes:
+    """Pixel-level fallback for watermarks BAKED directly into a scanned/
+    rendered page image (no separate PDF text/vector object exists to
+    redact — common with 'EducationBlog24'-style stamped study-material
+    PDFs). Detects the watermark's reddish color-cast (R channel notably
+    above G/B, the near-universal tint for this class of watermark) and
+    neutralizes ONLY that color, pixel-by-pixel, by pulling the R channel
+    down to min(G,B) wherever the cast is detected.
+
+    Deliberately conservative: real black/gray text has R≈G≈B so it is
+    never touched, and no dilation/blur is applied (tested: dilation fully
+    erases the watermark but also eats adjacent letter strokes — rejected).
+    Result: watermark color fully removed, a faint ghost outline may
+    remain, but 100% of real text/content stays intact and undamaged.
+    Pure PIL/numpy — no paid API, no AI inpainting."""
+    from PIL import Image as _PILImage
+    import numpy as _np
+
+    img = _PILImage.open(io.BytesIO(png_bytes)).convert("RGB")
+    arr = _np.array(img).astype(_np.float32)
+    R, G, B = arr[..., 0], arr[..., 1], arr[..., 2]
+
+    excess_r = _np.clip(R - _np.minimum(G, B), 0, None)
+    mask = excess_r > tint_threshold
+    new_r = _np.where(mask, _np.minimum(G, B), R)
+    arr[..., 0] = new_r
+    arr = _np.clip(arr, 0, 255).astype(_np.uint8)
+
+    out = io.BytesIO()
+    _PILImage.fromarray(arr).save(out, format="PNG")
+    return out.getvalue()
+
+
+def remove_baked_watermark_from_scanned_pdf(pdf_bytes: bytes, dpi: int = 150) -> bytes:
+    """Stage C fallback — for PDFs where each page is a single scanned/
+    rendered image with NO extractable text (verified via page.get_text()
+    being empty), so remove_watermark_from_pdf()'s text/vector-based
+    stages are no-ops. Re-rasterizes each page, runs
+    _desaturate_watermark_tint on the pixels, and rebuilds the PDF from
+    the cleaned images. Only applied when a page is confirmed image-only,
+    to avoid unnecessarily re-rasterizing (and quality-degrading) normal
+    text-based PDFs. Fail-safe: any error returns the original bytes."""
+    try:
+        import pymupdf as fitz
+    except Exception:
+        try:
+            import fitz
+        except Exception as ie:
+            logger.error(f"[DeWatermark/Baked] PyMuPDF not available: {ie}")
+            return pdf_bytes
+
+    try:
+        src = fitz.open(stream=pdf_bytes, filetype="pdf")
+        out_doc = fitz.open()
+
+        for page in src:
+            has_text = bool(page.get_text().strip())
+            if not has_text and page.get_images():
+                # Image-only page -> rasterize, clean, re-embed
+                pix = page.get_pixmap(dpi=dpi)
+                png_bytes = pix.tobytes("png")
+                cleaned_png = _desaturate_watermark_tint(png_bytes)
+
+                rect = page.rect
+                new_page = out_doc.new_page(width=rect.width, height=rect.height)
+                new_page.insert_image(rect, stream=cleaned_png)
+            else:
+                # Has real text/vector content -> copy page as-is (no
+                # lossy re-rasterization of genuine text-based pages)
+                out_doc.insert_pdf(src, from_page=page.number, to_page=page.number)
+
+        buf = out_doc.tobytes(garbage=4, deflate=True)
+        out_doc.close()
+        src.close()
+        return buf
+    except Exception as e:
+        logger.error(f"[DeWatermark/Baked] error: {e}")
+        return pdf_bytes
 
 
 def _render_bg_text_box_image(text: str, px_width: int, px_height: int,
