@@ -3514,6 +3514,157 @@ def remove_baked_watermark_from_scanned_pdf(pdf_bytes: bytes, dpi: int = 150) ->
         return pdf_bytes
 
 
+class WatermarkCancelled(Exception):
+    """Raised by remove_watermark_from_pdf_paged when cancel_cb() returns
+    True between pages — fail-safe, never leaves a half-written buffer
+    behind (caller decides what to do, e.g. drop the partial job)."""
+    pass
+
+
+def remove_watermark_from_pdf_paged(pdf_bytes: bytes, watermark_text: str = None,
+                                     page_indices: list = None,
+                                     progress_cb=None, cancel_cb=None) -> bytes:
+    """Page-by-page variant of remove_watermark_from_pdf(), for live
+    dashboards (/dwm, /dwt). Same 3-stage pipeline (pikepdf content-stream
+    scrub -> PyMuPDF text/geometry redaction -> per-page baked/scanned
+    pixel cleanup), but walks it ONE PAGE AT A TIME so the caller can
+    report {done}/{total} progress + ETA and support mid-job cancellation.
+
+    page_indices: 0-based page numbers to process (/dwt); other pages are
+        left byte-identical. None = every page (/dwm default).
+    progress_cb(done, total, page_no_1based, stage): called after each
+        per-page step finishes (stage is "stageA" or "stageB").
+    cancel_cb(): called between pages/stages; if it returns True, raises
+        WatermarkCancelled immediately (no corrupt/partial file returned).
+    """
+    import io as _io
+    import pikepdf
+
+    try:
+        import pymupdf as fitz
+    except Exception:
+        import fitz  # older import name fallback
+
+    # ---------- Stage A: pikepdf (qpdf) content-stream + annotation scrub, per page ----------
+    pdf = pikepdf.Pdf.open(_io.BytesIO(pdf_bytes))
+    total_pages = len(pdf.pages)
+    targets = set(page_indices) if page_indices is not None else set(range(total_pages))
+    total = len(targets) or 1
+    done = 0
+
+    for idx, page in enumerate(pdf.pages):
+        if idx not in targets:
+            continue
+        if cancel_cb and cancel_cb():
+            pdf.close()
+            raise WatermarkCancelled()
+
+        if "/Annots" in page:
+            try:
+                keep = [a for a in page.Annots
+                        if str(a.get("/Subtype", "")) != "/Watermark"]
+                if len(keep) != len(page.Annots):
+                    page.Annots = pdf.make_indirect(keep)
+            except Exception:
+                pass
+
+        low_alpha_gs = set()
+        try:
+            resources = page.get("/Resources", {})
+            extgstates = resources.get("/ExtGState", {}) if resources else {}
+            for gs_name, gs_obj in (extgstates.items() if extgstates else []):
+                ca = gs_obj.get("/ca")
+                CA = gs_obj.get("/CA")
+                alpha_vals = [float(v) for v in (ca, CA) if v is not None]
+                if alpha_vals and min(alpha_vals) < 0.6:
+                    low_alpha_gs.add(str(gs_name).lstrip("/"))
+        except Exception:
+            pass
+
+        if low_alpha_gs:
+            try:
+                content_bytes = pikepdf.parse_content_stream(page)
+                new_ops = []
+                depth_skip = 0
+                for operands, operator in content_bytes:
+                    op_str = str(operator)
+                    if op_str == "gs" and operands and str(operands[0]).lstrip("/") in low_alpha_gs:
+                        depth_skip += 1
+                        continue
+                    if depth_skip > 0:
+                        if op_str == "q":
+                            depth_skip += 1
+                            continue
+                        if op_str == "Q":
+                            depth_skip -= 1
+                            continue
+                        continue
+                    new_ops.append((operands, operator))
+                new_stream = pikepdf.unparse_content_stream(new_ops)
+                page.Contents = pdf.make_stream(new_stream)
+            except Exception as ce:
+                logger.warning(f"[DeWatermark/paged] pikepdf scrub skipped p{idx+1}: {ce}")
+
+        done += 1
+        if progress_cb:
+            try:
+                progress_cb(done, total, idx + 1, "stageA")
+            except Exception:
+                pass
+
+    buf = _io.BytesIO()
+    pdf.save(buf)
+    working = buf.getvalue()
+    pdf.close()
+
+    # ---------- Stage B + per-page Stage C: PyMuPDF text redaction + baked-image cleanup ----------
+    doc = fitz.open(stream=working, filetype="pdf")
+    done = 0
+    for pno in range(len(doc)):
+        if pno not in targets:
+            continue
+        if cancel_cb and cancel_cb():
+            doc.close()
+            raise WatermarkCancelled()
+
+        page = doc[pno]
+        has_text = bool(page.get_text().strip())
+
+        if watermark_text and has_text:
+            try:
+                rects = page.search_for(watermark_text, quads=False)
+            except Exception:
+                rects = []
+            for r in rects:
+                page.add_redact_annot(r, fill=None)
+            if rects:
+                page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+
+        if not has_text and page.get_images():
+            # Baked/scanned watermark on this page specifically -- clean the
+            # pixels in place rather than rebuilding the whole document, so
+            # every other (untouched) page's bytes stay exactly as they were.
+            try:
+                pix = page.get_pixmap(dpi=150)
+                png_bytes = pix.tobytes("png")
+                cleaned_png = _desaturate_watermark_tint(png_bytes)
+                rect = page.rect
+                page.insert_image(rect, stream=cleaned_png)
+            except Exception as be:
+                logger.warning(f"[DeWatermark/paged] baked-cleanup failed p{pno+1}: {be}")
+
+        done += 1
+        if progress_cb:
+            try:
+                progress_cb(done, total, pno + 1, "stageB")
+            except Exception:
+                pass
+
+    out = doc.tobytes(garbage=4, deflate=True, clean=True)
+    doc.close()
+    return out
+
+
 def _render_bg_text_box_image(text: str, px_width: int, px_height: int,
                                bg_rgb: tuple, fg_rgb: tuple = (255, 255, 255)) -> bytes:
     """Shared helper for /h and /f: renders `text` centered on a solid-color

@@ -144,6 +144,8 @@ from core import (
     get_recent_errors, clear_error_logs,
     add_watermark_to_pdf,
     remove_watermark_from_pdf,
+    remove_watermark_from_pdf_paged,
+    WatermarkCancelled,
     add_header_box_to_pdf,
     add_footer_box_to_pdf,
     get_bot_username,
@@ -14529,22 +14531,122 @@ async def handle_dwm_command(msg: dict):
 
     file_id = reply["document"]["file_id"]
     orig_filename = reply["document"].get("file_name")
-    await send_msg(chat_id, "⏳ Watermark remove হচ্ছে...", parse_mode="HTML")
+    job_id = new_job_id(chat_id)
+    clear_cancel(chat_id)
+    status_r = await send_msg(chat_id, _build_dwm_dashboard(orig_filename, 0, 1, time.time(), "⏳ শুরু হচ্ছে..."),
+                               parse_mode="HTML", reply_markup=_cancel_kb(chat_id, job_id))
+    status_msg_id = status_r.get("result", {}).get("message_id")
     _spawn_task(_remove_watermark_from_pdf_task(chat_id, file_id, dwm_text or None,
-                                                  reply["message_id"], orig_filename))
+                                                  reply["message_id"], orig_filename,
+                                                  status_msg_id=status_msg_id, job_id=job_id))
+
+
+def _parse_page_spec(spec: str, total_pages: int) -> list:
+    """'/dwt' er page-range/page-no argument ("3-7", "1,2,5", "3-7,9")
+    ke 0-based page-index list-e convert kore. Out-of-range/garbage
+    token silently skip hoy; result always de-duped + sorted."""
+    out = set()
+    for part in re.split(r"[,\s]+", spec.strip()):
+        if not part:
+            continue
+        m = re.match(r"^(\d+)-(\d+)$", part)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            if a > b:
+                a, b = b, a
+            for p in range(a, b + 1):
+                if 1 <= p <= total_pages:
+                    out.add(p - 1)
+        elif part.isdigit():
+            p = int(part)
+            if 1 <= p <= total_pages:
+                out.add(p - 1)
+    return sorted(out)
+
+
+def _build_dwm_dashboard(file_name: str, done: int, total: int, start_time: float, stage: str,
+                          extra_line: str = None) -> str:
+    """Premium-design live dashboard for /dwm & /dwt — page done/total,
+    % with progress bar, ETA, elapsed."""
+    elapsed = time.time() - start_time
+    pct = int(done / total * 100) if total else 0
+    bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+    eta_txt = "…"
+    if 0 < done < total:
+        eta_s = elapsed * (total - done) / done
+        eta_txt = _fmt_eta(eta_s)
+    elif done >= total and total:
+        eta_txt = "0s"
+    lines = [
+        "✨ <b>De-Watermark Live Dashboard</b> ✨",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"📄 File: {file_name or 'document.pdf'}",
+        f"📋 Page: {done}/{total}",
+        f"📊 Progress: {pct}% [{bar}]",
+        f"⏱️ Elapsed: {_fmt_eta(elapsed)}  |  ⏳ ETA: {eta_txt}",
+        f"🔧 Stage: {stage}",
+    ]
+    if extra_line:
+        lines.append(extra_line)
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    return "\n".join(lines)
 
 
 async def _remove_watermark_from_pdf_task(chat_id: int, file_id: str, wm_text: Optional[str],
-                                            message_id: int = None, orig_filename: str = None):
-    """Download PDF, strip watermark using remove_watermark_from_pdf, resend."""
+                                            message_id: int = None, orig_filename: str = None,
+                                            page_indices: list = None, status_msg_id: int = None,
+                                            job_id: int = None):
+    """Download PDF, strip watermark page-by-page with a live %/ETA/
+    inline-cancel dashboard, resend. page_indices=None -> every page
+    (/dwm); a list -> only those pages (/dwt)."""
     try:
         pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=message_id)
-        clean_bytes = remove_watermark_from_pdf(pdf_bytes, watermark_text=wm_text)
+
+        start_time = time.time()
+        _last_edit = {"t": 0.0, "pct": -1}
+
+        def _cancel_check():
+            return job_id is not None and CURRENT_JOB_ID.get(chat_id) != job_id or is_cancelled(chat_id)
+
+        def _progress(done, total, page_no, stage):
+            now = time.time()
+            pct = int(done / total * 100) if total else 0
+            # Throttle: at most ~1 edit/1.5s, always edit on first/last page.
+            if pct == _last_edit["pct"] and now - _last_edit["t"] < 1.5 and done != total:
+                return
+            _last_edit["pct"] = pct
+            _last_edit["t"] = now
+            stage_label = "🧹 Content-stream scrub" if stage == "stageA" else "🎯 Text/image redaction"
+            if status_msg_id:
+                _spawn_task(edit_msg(chat_id, status_msg_id,
+                    _build_dwm_dashboard(orig_filename, done, total, start_time, stage_label,
+                                         extra_line=f"📍 Current page: {page_no}"),
+                    parse_mode="HTML", reply_markup=_cancel_kb(chat_id, job_id)))
+
+        try:
+            clean_bytes = await asyncio.to_thread(
+                remove_watermark_from_pdf_paged, pdf_bytes, wm_text, page_indices,
+                _progress, _cancel_check)
+        except WatermarkCancelled:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id,
+                    _build_dwm_dashboard(orig_filename, 0, 1, start_time, "🛑 বাতিল করা হলো")
+                    + "\n🛑 Job cancelled by user.")
+            return
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                _build_dwm_dashboard(orig_filename, 1, 1, start_time, "✅ সম্পন্ন!"),
+                parse_mode="HTML")
+
         out_name = _tg_safe_filename(orig_filename, default="dewatermarked.pdf")
         name_line = f"📄 {orig_filename}\n" if orig_filename else ""
+        pages_line = ""
+        if page_indices is not None:
+            pages_line = f"📍 Pages: {', '.join(str(i + 1) for i in page_indices)}\n"
         send_res = await send_document(chat_id, clean_bytes,
             out_name,
-            caption=f"{name_line}✅ Watermark removed",
+            caption=f"{name_line}{pages_line}✅ Watermark removed",
             mime_type="application/pdf"
         )
         if not send_res.get("ok"):
@@ -14553,6 +14655,50 @@ async def _remove_watermark_from_pdf_task(chat_id: int, file_id: str, wm_text: O
             await send_msg(chat_id, f"❌ পাঠাতে ব্যর্থ: {err}")
     except Exception as e:
         await send_msg(chat_id, f"❌ De-watermark error: {e}")
+
+
+async def handle_dwt_command(msg: dict):
+    """/dwt <page range or page no> — reply diye kono PDF-e dile, SHUDHU
+    oi page(gulo)-r watermark remove kore dibe (baki page byte-identical
+    thake). Format: /dwt 3-7  ba  /dwt 1,2,5  ba  /dwt 3-7,9"""
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "").strip()
+    page_spec = re.sub(r"^/dwt\s*", "", text, flags=re.IGNORECASE).strip()
+    reply = msg.get("reply_to_message")
+
+    if not page_spec or not (reply and reply.get("document")):
+        await send_msg(chat_id,
+            "📌 Usage: PDF-e reply করে <code>/dwt page_range</code> দাও।\n"
+            "উদাহরণ: <code>/dwt 3-7</code>, <code>/dwt 1,2,5</code>, <code>/dwt 3-7,9</code>",
+            parse_mode="HTML")
+        return
+
+    file_id = reply["document"]["file_id"]
+    orig_filename = reply["document"].get("file_name")
+
+    try:
+        import pikepdf as _pikepdf
+        pdf_bytes_peek = await download_tg_file(file_id, chat_id=chat_id, message_id=reply["message_id"])
+        total_pages = len(_pikepdf.Pdf.open(BytesIO(pdf_bytes_peek)).pages)
+    except Exception as e:
+        await send_msg(chat_id, f"❌ PDF পড়তে সমস্যা হয়েছে: {e}")
+        return
+
+    page_indices = _parse_page_spec(page_spec, total_pages)
+    if not page_indices:
+        await send_msg(chat_id, f"❌ সঠিক page range দাও (PDF-এ মোট {total_pages} page আছে)।", parse_mode="HTML")
+        return
+
+    job_id = new_job_id(chat_id)
+    clear_cancel(chat_id)
+    status_r = await send_msg(chat_id,
+        _build_dwm_dashboard(orig_filename, 0, len(page_indices), time.time(), "⏳ শুরু হচ্ছে..."),
+        parse_mode="HTML", reply_markup=_cancel_kb(chat_id, job_id))
+    status_msg_id = status_r.get("result", {}).get("message_id")
+    _spawn_task(_remove_watermark_from_pdf_task(chat_id, file_id, None,
+                                                  reply["message_id"], orig_filename,
+                                                  page_indices=page_indices,
+                                                  status_msg_id=status_msg_id, job_id=job_id))
 
 
 async def handle_header_command(msg: dict):
@@ -40797,6 +40943,11 @@ async def handle_message(msg: dict):
             await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_dwm_command(msg))
+    elif text.startswith("/dwt"):
+        if not is_auth:
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
+            return
+        _spawn_command_task(uid, handle_dwt_command(msg))
     elif text.startswith("/h") and (text == "/h" or text.startswith("/h ") or text.startswith("/h\n")):
         if not is_auth:
             await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
