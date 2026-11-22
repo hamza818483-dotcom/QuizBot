@@ -3237,29 +3237,121 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str, footer_text: str
 
 
 def remove_watermark_from_pdf(pdf_bytes: bytes, watermark_text: str = None) -> bytes:
-    """Watermark remove kore PDF theke. Kaj kore 2 vabe:
-    1) watermark_text dile -> PyMuPDF diye sheI text-er shob occurrence
-       (diagonal/rotated soho) page content theke khuje redact kore felbe,
-       plus same text wala matching annotation/XObject skip kore.
-    2) watermark_text na dile -> generic cleanup: semi-transparent
-       (alpha < ~0.5) text/graphics objects soriye dewa hoy (typical
-       watermark signature), ar common watermark-image XObject gulo
-       (bohul babohrito size/opacity pattern) bade dewa hoy.
-    PyMuPDF na thakle ba kono error hole, original bytes ferot pathano hoy
-    (fail-safe — kokhono crash kore na)."""
+    """Watermark remove kore PDF theke, 2-stage pipeline diye (both free/OSS,
+    battle-tested libs — qpdf-backed pikepdf for safe low-level content-stream
+    rewriting, PyMuPDF for geometry-aware text/image redaction):
+
+    Stage A (pikepdf, qpdf engine) — content-stream token-level scrub:
+      - Prarombhik/cq 'gs' operator diye set kora low-opacity ExtGState
+        (ca/CA < ~0.6) wala drawing block gulo surgically kete fela hoy.
+        Eta watermark-er sob theke common signature (semi-transparent
+        diagonal text/image), ar page-er normal content-e kokhono eto kom
+        alpha use hoy na — tai false-positive risk kom.
+      - PDF-er /Watermark subtype annotation gulo (Acrobat/Word-generated
+        watermark) soja delete kora hoy.
+
+    Stage B (PyMuPDF) — geometry/text based cleanup:
+      - watermark_text dile: exact sheI text-er shob occurrence
+        (rotated/diagonal soho — PyMuPDF rotation-aware search kore)
+        redact kore mucha hoy, including underlying image pixels jodi thake.
+      - watermark_text na dile: proper-token-parsed re-scan kore bad soja
+        gele bade jawa kono leftover low-alpha ExtGState clean kora hoy.
+
+    Kono stage fail korleo pipeline thamena — jeta success hoy sheta apply
+    hoy, r pura process fail korle original bytes fail-safe hisebe
+    ferot jay (kokhono crash/corrupt file dey na)."""
+    import io as _io
+
+    working = pdf_bytes
+
+    # ---------- Stage A: pikepdf (qpdf) content-stream + annotation scrub ----------
     try:
-        import fitz  # PyMuPDF
-    except Exception as ie:
-        logger.error(f"[DeWatermark] PyMuPDF not available: {ie}")
-        return pdf_bytes
+        import pikepdf
+        from pikepdf import Pdf, Name
+
+        pdf = Pdf.open(_io.BytesIO(working))
+
+        for page in pdf.pages:
+            # Drop Acrobat/Word-native watermark annotations outright.
+            if "/Annots" in page:
+                try:
+                    keep = [a for a in page.Annots
+                            if str(a.get("/Subtype", "")) != "/Watermark"]
+                    if len(keep) != len(page.Annots):
+                        page.Annots = pdf.make_indirect(keep)
+                except Exception:
+                    pass
+
+            # Identify ExtGState names with low fill/stroke alpha (ca/CA).
+            low_alpha_gs = set()
+            try:
+                resources = page.get("/Resources", {})
+                extgstates = resources.get("/ExtGState", {}) if resources else {}
+                for gs_name, gs_obj in (extgstates.items() if extgstates else []):
+                    ca = gs_obj.get("/ca")
+                    CA = gs_obj.get("/CA")
+                    alpha_vals = [float(v) for v in (ca, CA) if v is not None]
+                    if alpha_vals and min(alpha_vals) < 0.6:
+                        low_alpha_gs.add(str(gs_name).lstrip("/"))
+            except Exception:
+                pass
+
+            if not low_alpha_gs:
+                continue
+
+            try:
+                raw = page.get("/Contents", None)
+                content_bytes = pikepdf.parse_content_stream(page)
+            except Exception:
+                content_bytes = None
+
+            if content_bytes is None:
+                continue
+
+            try:
+                new_ops = []
+                depth_skip = 0
+                for operands, operator in content_bytes:
+                    op_str = str(operator)
+                    if op_str == "gs" and operands and str(operands[0]).lstrip("/") in low_alpha_gs:
+                        depth_skip += 1
+                        continue
+                    if depth_skip > 0:
+                        if op_str == "q":
+                            depth_skip += 1
+                            continue
+                        if op_str == "Q":
+                            depth_skip -= 1
+                            continue
+                        continue  # swallow every op belonging to the low-alpha block
+                    new_ops.append((operands, operator))
+
+                new_stream = pikepdf.unparse_content_stream(new_ops)
+                page.Contents = pdf.make_stream(new_stream)
+            except Exception as ce:
+                logger.warning(f"[DeWatermark] pikepdf content scrub skipped: {ce}")
+
+        buf = _io.BytesIO()
+        pdf.save(buf)
+        working = buf.getvalue()
+        pdf.close()
+    except Exception as e:
+        logger.warning(f"[DeWatermark] pikepdf stage skipped/failed, continuing: {e}")
+
+    # ---------- Stage B: PyMuPDF geometry/text-based redaction ----------
+    try:
+        import pymupdf as fitz
+    except Exception:
+        try:
+            import fitz  # older import name fallback
+        except Exception as ie:
+            logger.error(f"[DeWatermark] PyMuPDF not available, returning pikepdf-stage result: {ie}")
+            return working
 
     try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        doc = fitz.open(stream=working, filetype="pdf")
 
         for page in doc:
-            removed_any = False
-
-            # --- Step 1: targeted text removal (if a watermark string given) ---
             if watermark_text:
                 try:
                     rects = page.search_for(watermark_text, quads=False)
@@ -3267,54 +3359,15 @@ def remove_watermark_from_pdf(pdf_bytes: bytes, watermark_text: str = None) -> b
                     rects = []
                 for r in rects:
                     page.add_redact_annot(r, fill=None)
-                    removed_any = True
-                if removed_any:
+                if rects:
                     page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
-
-            # --- Step 2: strip low-opacity ("ghost") text/graphics which is
-            # the near-universal signature of diagonal watermarks (incl. the
-            # ones this same bot stamps via add_watermark_to_pdf, alpha=0.10) ---
-            try:
-                cont = page.read_contents()
-            except Exception:
-                cont = None
-            if cont:
-                try:
-                    text = cont.decode("latin-1", errors="ignore")
-                    # Remove any graphics-state block that sets a low fill-alpha
-                    # (watermarks use alpha ~0.08-0.35) followed by its draw ops,
-                    # up to the matching Q (restore). Conservative regex-based
-                    # scrub — only touches ExtGState alpha blocks.
-                    import re as _re
-                    new_text = _re.sub(
-                        r"/GS\d+\s+gs(?:(?!\bQ\b).)*?Q",
-                        "Q",
-                        text,
-                        flags=_re.DOTALL,
-                    )
-                    if new_text != text:
-                        page.set_contents(new_text.encode("latin-1", errors="ignore"))
-                        removed_any = True
-                except Exception as ce:
-                    logger.warning(f"[DeWatermark] content-stream scrub skipped p{page.number}: {ce}")
-
-            # --- Step 3: drop low-opacity ExtGState entries + any image
-            # XObject whose /SMask or own placement looks like a full-page
-            # tiled/rotated overlay (common watermark-image pattern) ---
-            try:
-                xobjs = page.get_xobjects()
-                for xo in xobjs:
-                    pass  # metadata-only inspection; actual purge handled by
-                          # garbage collection on save below once unreferenced
-            except Exception:
-                pass
 
         out = doc.tobytes(garbage=4, deflate=True, clean=True)
         doc.close()
         return out
     except Exception as e:
-        logger.error(f"[DeWatermark] error: {e}")
-        return pdf_bytes
+        logger.error(f"[DeWatermark] PyMuPDF stage error, returning pikepdf-stage result: {e}")
+        return working
 
 
 def _render_bg_text_box_image(text: str, px_width: int, px_height: int,
