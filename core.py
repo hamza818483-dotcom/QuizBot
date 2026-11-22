@@ -3424,7 +3424,7 @@ def _desaturate_watermark_tint(png_bytes: bytes, tint_threshold: int = 5) -> byt
     wm_mask = excess_r > tint_threshold
 
     luma = (R + G + B) / 3
-    is_dark_neutral = (luma < 170) & (_np.abs(R - G) < 15) & (_np.abs(G - B) < 15)
+    is_dark_neutral = (luma < 150) & (_np.abs(R - G) < 15) & (_np.abs(G - B) < 15)
     text_buffer = _cv2.dilate(
         is_dark_neutral.astype(_np.uint8), _np.ones((9, 9), _np.uint8), iterations=4
     ).astype(bool)
@@ -3432,15 +3432,30 @@ def _desaturate_watermark_tint(png_bytes: bytes, tint_threshold: int = 5) -> byt
     near_text_mask = wm_mask & text_buffer
     safe_inpaint_mask = wm_mask & (~text_buffer)
 
-    out = arr.copy()
-    new_r = _np.where(near_text_mask, _np.minimum(G, B), R)
-    out[..., 0] = _np.clip(new_r, 0, 255).astype(_np.uint8)
+    out = arr.copy().astype(_np.float64)
+    minGB = _np.minimum(G, B).astype(_np.float64)
+    out[..., 0] = _np.where(near_text_mask, minGB, out[..., 0])
 
+    # Residual-ghost pass: desaturating only removes the red tint, leaving a
+    # faint gray silhouette of the watermark wherever it sits over/near text
+    # (near_text_mask) since those pixels are deliberately skipped by
+    # inpainting. Any such pixel that ISN'T actual dark letter-ink
+    # (is_dark_neutral) is pushed toward white in proportion to how light it
+    # already is, erasing the silhouette while leaving real strokes (which
+    # are much darker) essentially untouched.
+    ghost_only = near_text_mask & (~is_dark_neutral)
+    g_luma = (out[..., 0] + out[..., 1] + out[..., 2]) / 3
+    brighten_factor = _np.clip((g_luma - 130) / (240 - 130), 0, 1) ** 0.6
+    for c in range(3):
+        ch = out[..., c]
+        out[..., c] = ch + (255 - ch) * brighten_factor * ghost_only
+
+    out = _np.clip(out, 0, 255).astype(_np.uint8)
     inpaint_mask_u8 = (safe_inpaint_mask.astype(_np.uint8)) * 255
-    out = _cv2.inpaint(out, inpaint_mask_u8, inpaintRadius=3, flags=_cv2.INPAINT_TELEA)
+    out = _cv2.inpaint(out, inpaint_mask_u8, inpaintRadius=4, flags=_cv2.INPAINT_TELEA)
 
     pil_out = _PILImage.fromarray(out)
-    pil_out = _ImageEnhance.Contrast(pil_out).enhance(1.35)
+    pil_out = _ImageEnhance.Contrast(pil_out).enhance(1.15)
 
     buf = io.BytesIO()
     pil_out.save(buf, format="PNG")
