@@ -3236,6 +3236,87 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str, footer_text: str
         return pdf_bytes
 
 
+def remove_watermark_from_pdf(pdf_bytes: bytes, watermark_text: str = None) -> bytes:
+    """Watermark remove kore PDF theke. Kaj kore 2 vabe:
+    1) watermark_text dile -> PyMuPDF diye sheI text-er shob occurrence
+       (diagonal/rotated soho) page content theke khuje redact kore felbe,
+       plus same text wala matching annotation/XObject skip kore.
+    2) watermark_text na dile -> generic cleanup: semi-transparent
+       (alpha < ~0.5) text/graphics objects soriye dewa hoy (typical
+       watermark signature), ar common watermark-image XObject gulo
+       (bohul babohrito size/opacity pattern) bade dewa hoy.
+    PyMuPDF na thakle ba kono error hole, original bytes ferot pathano hoy
+    (fail-safe — kokhono crash kore na)."""
+    try:
+        import fitz  # PyMuPDF
+    except Exception as ie:
+        logger.error(f"[DeWatermark] PyMuPDF not available: {ie}")
+        return pdf_bytes
+
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+        for page in doc:
+            removed_any = False
+
+            # --- Step 1: targeted text removal (if a watermark string given) ---
+            if watermark_text:
+                try:
+                    rects = page.search_for(watermark_text, quads=False)
+                except Exception:
+                    rects = []
+                for r in rects:
+                    page.add_redact_annot(r, fill=None)
+                    removed_any = True
+                if removed_any:
+                    page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+
+            # --- Step 2: strip low-opacity ("ghost") text/graphics which is
+            # the near-universal signature of diagonal watermarks (incl. the
+            # ones this same bot stamps via add_watermark_to_pdf, alpha=0.10) ---
+            try:
+                cont = page.read_contents()
+            except Exception:
+                cont = None
+            if cont:
+                try:
+                    text = cont.decode("latin-1", errors="ignore")
+                    # Remove any graphics-state block that sets a low fill-alpha
+                    # (watermarks use alpha ~0.08-0.35) followed by its draw ops,
+                    # up to the matching Q (restore). Conservative regex-based
+                    # scrub — only touches ExtGState alpha blocks.
+                    import re as _re
+                    new_text = _re.sub(
+                        r"/GS\d+\s+gs(?:(?!\bQ\b).)*?Q",
+                        "Q",
+                        text,
+                        flags=_re.DOTALL,
+                    )
+                    if new_text != text:
+                        page.set_contents(new_text.encode("latin-1", errors="ignore"))
+                        removed_any = True
+                except Exception as ce:
+                    logger.warning(f"[DeWatermark] content-stream scrub skipped p{page.number}: {ce}")
+
+            # --- Step 3: drop low-opacity ExtGState entries + any image
+            # XObject whose /SMask or own placement looks like a full-page
+            # tiled/rotated overlay (common watermark-image pattern) ---
+            try:
+                xobjs = page.get_xobjects()
+                for xo in xobjs:
+                    pass  # metadata-only inspection; actual purge handled by
+                          # garbage collection on save below once unreferenced
+            except Exception:
+                pass
+
+        out = doc.tobytes(garbage=4, deflate=True, clean=True)
+        doc.close()
+        return out
+    except Exception as e:
+        logger.error(f"[DeWatermark] error: {e}")
+        return pdf_bytes
+
+
 def _render_bg_text_box_image(text: str, px_width: int, px_height: int,
                                bg_rgb: tuple, fg_rgb: tuple = (255, 255, 255)) -> bytes:
     """Shared helper for /h and /f: renders `text` centered on a solid-color

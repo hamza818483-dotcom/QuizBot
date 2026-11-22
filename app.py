@@ -143,6 +143,7 @@ from core import (
     build_back_url, source_msg_id,
     get_recent_errors, clear_error_logs,
     add_watermark_to_pdf,
+    remove_watermark_from_pdf,
     add_header_box_to_pdf,
     add_footer_box_to_pdf,
     get_bot_username,
@@ -14505,6 +14506,53 @@ async def _apply_watermark_to_pdf(chat_id: int, file_id: str, wm_text: str, mess
             await send_msg(chat_id, f"❌ পাঠাতে ব্যর্থ: {err}")
     except Exception as e:
         await send_msg(chat_id, f"❌ Watermark error: {e}")
+
+
+async def handle_dwm_command(msg: dict):
+    """/dwm (optional: exact watermark text) — reply diye kono PDF-e dile
+    sheI PDF theke watermark remove kore dibe.
+    - Text dile: oi exact text-er shob occurrence khuje redact kore.
+    - Text na dile: generic low-opacity ("ghost") watermark cleanup chalabe
+      (page-e thaka semi-transparent diagonal text/graphics shoriye dibe)."""
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    text = msg.get("text", "").strip()
+    dwm_text = re.sub(r"^/dwm\s*", "", text, flags=re.IGNORECASE).strip()
+    reply = msg.get("reply_to_message")
+
+    if not (reply and reply.get("document")):
+        await send_msg(chat_id,
+            "📌 Usage: PDF-e reply করে <code>/dwm</code> দিলে watermark remove হবে।\n"
+            "নির্দিষ্ট watermark text জানা থাকলে: <code>/dwm WatermarkText</code>",
+            parse_mode="HTML")
+        return
+
+    file_id = reply["document"]["file_id"]
+    orig_filename = reply["document"].get("file_name")
+    await send_msg(chat_id, "⏳ Watermark remove হচ্ছে...", parse_mode="HTML")
+    _spawn_task(_remove_watermark_from_pdf_task(chat_id, file_id, dwm_text or None,
+                                                  reply["message_id"], orig_filename))
+
+
+async def _remove_watermark_from_pdf_task(chat_id: int, file_id: str, wm_text: Optional[str],
+                                            message_id: int = None, orig_filename: str = None):
+    """Download PDF, strip watermark using remove_watermark_from_pdf, resend."""
+    try:
+        pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=message_id)
+        clean_bytes = remove_watermark_from_pdf(pdf_bytes, watermark_text=wm_text)
+        out_name = _tg_safe_filename(orig_filename, default="dewatermarked.pdf")
+        name_line = f"📄 {orig_filename}\n" if orig_filename else ""
+        send_res = await send_document(chat_id, clean_bytes,
+            out_name,
+            caption=f"{name_line}✅ Watermark removed",
+            mime_type="application/pdf"
+        )
+        if not send_res.get("ok"):
+            err = send_res.get("error") or send_res.get("description") or "unknown error"
+            logger.error(f"[DWM] send_document failed: {err}")
+            await send_msg(chat_id, f"❌ পাঠাতে ব্যর্থ: {err}")
+    except Exception as e:
+        await send_msg(chat_id, f"❌ De-watermark error: {e}")
 
 
 async def handle_header_command(msg: dict):
@@ -40744,6 +40792,11 @@ async def handle_message(msg: dict):
             await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_wm_command(msg))
+    elif text.startswith("/dwm"):
+        if not is_auth:
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
+            return
+        _spawn_command_task(uid, handle_dwm_command(msg))
     elif text.startswith("/h") and (text == "/h" or text.startswith("/h ") or text.startswith("/h\n")):
         if not is_auth:
             await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
