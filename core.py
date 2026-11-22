@@ -3385,37 +3385,66 @@ def remove_watermark_from_pdf(pdf_bytes: bytes, watermark_text: str = None) -> b
         return working
 
 
-def _desaturate_watermark_tint(png_bytes: bytes, tint_threshold: int = 6) -> bytes:
+def _desaturate_watermark_tint(png_bytes: bytes, tint_threshold: int = 5) -> bytes:
     """Pixel-level fallback for watermarks BAKED directly into a scanned/
     rendered page image (no separate PDF text/vector object exists to
     redact — common with 'EducationBlog24'-style stamped study-material
-    PDFs). Detects the watermark's reddish color-cast (R channel notably
-    above G/B, the near-universal tint for this class of watermark) and
-    neutralizes ONLY that color, pixel-by-pixel, by pulling the R channel
-    down to min(G,B) wherever the cast is detected.
+    PDFs). Hybrid 3-step cleanup, tuned + visually verified on a real
+    sample (color fully gone, zero character damage):
 
-    Deliberately conservative: real black/gray text has R≈G≈B so it is
-    never touched, and no dilation/blur is applied (tested: dilation fully
-    erases the watermark but also eats adjacent letter strokes — rejected).
-    Result: watermark color fully removed, a faint ghost outline may
-    remain, but 100% of real text/content stays intact and undamaged.
-    Pure PIL/numpy — no paid API, no AI inpainting."""
-    from PIL import Image as _PILImage
+    1) Detect the watermark's reddish color-cast (R channel notably above
+       G/B — the near-universal tint for this watermark class).
+    2) Detect real text/content as dark-neutral pixels (low luma, R≈G≈B)
+       and build a generous protective buffer around it (dilated — err on
+       the side of protecting letters). Any watermark pixel inside this
+       buffer is only DESATURATED (R pulled down to min(G,B)) — never
+       inpainted, since inpainting directly over/beside letter strokes
+       was tested and found to smudge them.
+    3) Watermark pixels clearly away from any text ARE inpainted
+       (cv2.INPAINT_TELEA) using surrounding background pixels — this is
+       what makes the watermark's shape disappear almost entirely in open
+       areas, instead of just losing its color.
+    Finally a mild contrast boost sharpens real text and pushes any
+    remaining faint residue closer to white.
+
+    Deliberately conservative near text: real letters are never touched by
+    inpainting, only by the harmless desaturation step. Pure PIL/numpy/
+    OpenCV — no paid API, no AI inpainting service, fully offline."""
+    from PIL import Image as _PILImage, ImageEnhance as _ImageEnhance
     import numpy as _np
+    import cv2 as _cv2
 
     img = _PILImage.open(io.BytesIO(png_bytes)).convert("RGB")
-    arr = _np.array(img).astype(_np.float32)
-    R, G, B = arr[..., 0], arr[..., 1], arr[..., 2]
+    arr = _np.array(img)
+    R = arr[..., 0].astype(_np.int16)
+    G = arr[..., 1].astype(_np.int16)
+    B = arr[..., 2].astype(_np.int16)
 
     excess_r = _np.clip(R - _np.minimum(G, B), 0, None)
-    mask = excess_r > tint_threshold
-    new_r = _np.where(mask, _np.minimum(G, B), R)
-    arr[..., 0] = new_r
-    arr = _np.clip(arr, 0, 255).astype(_np.uint8)
+    wm_mask = excess_r > tint_threshold
 
-    out = io.BytesIO()
-    _PILImage.fromarray(arr).save(out, format="PNG")
-    return out.getvalue()
+    luma = (R + G + B) / 3
+    is_dark_neutral = (luma < 170) & (_np.abs(R - G) < 15) & (_np.abs(G - B) < 15)
+    text_buffer = _cv2.dilate(
+        is_dark_neutral.astype(_np.uint8), _np.ones((9, 9), _np.uint8), iterations=4
+    ).astype(bool)
+
+    near_text_mask = wm_mask & text_buffer
+    safe_inpaint_mask = wm_mask & (~text_buffer)
+
+    out = arr.copy()
+    new_r = _np.where(near_text_mask, _np.minimum(G, B), R)
+    out[..., 0] = _np.clip(new_r, 0, 255).astype(_np.uint8)
+
+    inpaint_mask_u8 = (safe_inpaint_mask.astype(_np.uint8)) * 255
+    out = _cv2.inpaint(out, inpaint_mask_u8, inpaintRadius=3, flags=_cv2.INPAINT_TELEA)
+
+    pil_out = _PILImage.fromarray(out)
+    pil_out = _ImageEnhance.Contrast(pil_out).enhance(1.35)
+
+    buf = io.BytesIO()
+    pil_out.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def remove_baked_watermark_from_scanned_pdf(pdf_bytes: bytes, dpi: int = 150) -> bytes:
