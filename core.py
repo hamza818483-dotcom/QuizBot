@@ -3455,7 +3455,12 @@ def _desaturate_watermark_tint(png_bytes: bytes, tint_threshold: int = 5) -> byt
     out = _cv2.inpaint(out, inpaint_mask_u8, inpaintRadius=4, flags=_cv2.INPAINT_TELEA)
 
     pil_out = _PILImage.fromarray(out)
-    pil_out = _ImageEnhance.Contrast(pil_out).enhance(1.15)
+    # Extra brightness pass: the residual ghost that survives the steps above
+    # is a light gray smudge (no red left in it), so pushing overall page
+    # brightness up fades it further toward white; real text stays dark
+    # enough to stay fully readable. Tested on real sample at this level.
+    pil_out = _ImageEnhance.Brightness(pil_out).enhance(1.3)
+    pil_out = _ImageEnhance.Contrast(pil_out).enhance(1.05)
 
     buf = io.BytesIO()
     pil_out.save(buf, format="PNG")
