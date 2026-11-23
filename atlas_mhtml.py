@@ -304,15 +304,12 @@ def aggressive_clean(text):
     text = re.sub(r'\$\\d?frac\{.*?\}\{.*?\}\$', _pre_final_protect, text)
     text = re.sub(r'\$\\sqrt\{.*?\}\$', _pre_final_protect, text)
 
-    # Vector arrow fix: get_text(separator=" ", ...) inserts a space at every
-    # inline-tag boundary, so a letter followed by a combining "arrow above"
-    # (U+20D7, e.g. rendering as V⃗ for vector V) ends up as "V ⃗" -- the
-    # arrow floats beside the letter instead of sitting directly above it,
-    # since a combining character must immediately follow its base letter
-    # with no space between them. Also handle the standalone (non-combining)
-    # right-arrow U+2192 used the same way in some source markup.
+    # Vector-arrow combining mark fix only: get_text(separator=" ", ...) can
+    # split a letter from U+20D7 (⃗) at inline-tag boundaries. Rejoin the
+    # combining mark to its base, but NEVER reinterpret the ordinary right
+    # arrow U+2192 (→) as a vector mark; it is a meaningful physics/math
+    # operator (e.g. A → B) and must remain unchanged.
     text = re.sub(r'([^\s\u0300-\u036F\u20D0-\u20FF])\s+([\u20D0-\u20FF])', r'\1\2', text)
-    text = re.sub(r'([A-Za-z\u0980-\u09FF])\s+(\u2192)(?!\w)(?![\s\u0980-\u09FF])', lambda m: m.group(1) + '\u20D7', text)
     # Unit-vector "hat" notation written as a literal ASCII caret after the
     # letter with a space (e.g. "i ^", "j ^") -- not a Unicode combining
     # character itself, so the arrow-diacritic regex above doesn't catch it.
