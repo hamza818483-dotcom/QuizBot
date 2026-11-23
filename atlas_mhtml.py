@@ -1501,7 +1501,10 @@ def _convert_sutonny_spans(node):
             # following দাঁড়ি (।), e.g. "ভিত্তি।" (noun+ি then দাঁড়ি) comes
             # out as "ভিত্ত।ি" with the ি stranded AFTER the দাঁড়ি instead
             # of before it. Move it back.
-            out = re.sub(r'।(ি)(?=\s|$)', r'\1।', out)
+            # Generalized to every matra, not just ি: also confirmed with ে,
+            # e.g. "কর।ে এদের" -> should read "করে। এদের" (does. These are
+            # called...), "বল।ে" -> "বলে।" (is called).
+            out = re.sub(r'।([িীুূেৈোৌ])(?=\s|$)', r'\1।', out)
             out = out.replace("æ", "ু")
             # unicodeconverter's Bijoy map also mis-places the prebase
             # e-kar (ে) when it's really the left half of an ও-kার split
