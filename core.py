@@ -3644,14 +3644,28 @@ def remove_watermark_from_pdf_paged(pdf_bytes: bytes, watermark_text: str = None
             # Baked/scanned watermark on this page specifically -- clean the
             # pixels in place rather than rebuilding the whole document, so
             # every other (untouched) page's bytes stay exactly as they were.
+            # RAM safety: lower dpi automatically once the job is large, so
+            # per-page decoded-bitmap peak stays bounded regardless of how
+            # many total pages are in the run.
+            _dpi = 150 if total <= 30 else (120 if total <= 80 else 100)
             try:
-                pix = page.get_pixmap(dpi=150)
+                pix = page.get_pixmap(dpi=_dpi)
                 png_bytes = pix.tobytes("png")
+                pix = None
                 cleaned_png = _desaturate_watermark_tint(png_bytes)
+                png_bytes = None
                 rect = page.rect
                 page.insert_image(rect, stream=cleaned_png)
+                cleaned_png = None
             except Exception as be:
                 logger.warning(f"[DeWatermark/paged] baked-cleanup failed p{pno+1}: {be}")
+            # Free the just-decoded bitmap(s) immediately instead of
+            # waiting for the whole-document loop to finish -- this is
+            # the main RAM-spike source (numpy/OpenCV + PIL buffers per
+            # page), so collecting now keeps peak usage flat across a
+            # long multi-page run rather than growing with page count.
+            import gc as _gc
+            _gc.collect()
 
         done += 1
         if progress_cb:

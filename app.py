@@ -14531,6 +14531,23 @@ async def handle_dwm_command(msg: dict):
 
     file_id = reply["document"]["file_id"]
     orig_filename = reply["document"].get("file_name")
+
+    try:
+        import pikepdf as _pikepdf
+        pdf_bytes_peek = await download_tg_file(file_id, chat_id=chat_id, message_id=reply["message_id"])
+        total_pages = len(_pikepdf.Pdf.open(BytesIO(pdf_bytes_peek)).pages)
+    except Exception as e:
+        await send_msg(chat_id, f"❌ PDF পড়তে সমস্যা হয়েছে: {e}")
+        return
+
+    if total_pages > _DWM_MAX_PAGES:
+        await send_msg(chat_id,
+            f"⚠️ এই PDF-এ {total_pages} page — RAM safety-র জন্য একসাথে সর্বোচ্চ {_DWM_MAX_PAGES} page "
+            f"process করা যায়।\nদয়া করে <code>/dwt</code> দিয়ে ছোট range-এ ভাগ করে পাঠাও, যেমন: "
+            f"<code>/dwt 1-{_DWM_MAX_PAGES}</code>, তারপর <code>/dwt {_DWM_MAX_PAGES+1}-{total_pages}</code>",
+            parse_mode="HTML")
+        return
+
     job_id = new_job_id(chat_id)
     clear_cancel(chat_id)
     status_r = await send_msg(chat_id, _build_dwm_dashboard(orig_filename, 0, 1, time.time(), "⏳ শুরু হচ্ছে..."),
@@ -14538,7 +14555,11 @@ async def handle_dwm_command(msg: dict):
     status_msg_id = status_r.get("result", {}).get("message_id")
     _spawn_task(_remove_watermark_from_pdf_task(chat_id, file_id, dwm_text or None,
                                                   reply["message_id"], orig_filename,
-                                                  status_msg_id=status_msg_id, job_id=job_id))
+                                                  status_msg_id=status_msg_id, job_id=job_id,
+                                                  pdf_bytes_cached=pdf_bytes_peek))
+
+
+_DWM_MAX_PAGES = 80  # RAM-safety cap: beyond this, suggest /dwt in chunks instead of /dwm on the whole file
 
 
 def _parse_page_spec(spec: str, total_pages: int) -> list:
@@ -14595,12 +14616,15 @@ def _build_dwm_dashboard(file_name: str, done: int, total: int, start_time: floa
 async def _remove_watermark_from_pdf_task(chat_id: int, file_id: str, wm_text: Optional[str],
                                             message_id: int = None, orig_filename: str = None,
                                             page_indices: list = None, status_msg_id: int = None,
-                                            job_id: int = None):
-    """Download PDF, strip watermark page-by-page with a live %/ETA/
-    inline-cancel dashboard, resend. page_indices=None -> every page
-    (/dwm); a list -> only those pages (/dwt)."""
+                                            job_id: int = None, pdf_bytes_cached: bytes = None):
+    """Download PDF (or reuse an already-downloaded copy via
+    pdf_bytes_cached, since both /dwm and /dwt peek the page count first),
+    strip watermark page-by-page with a live %/ETA/inline-cancel dashboard,
+    resend. page_indices=None -> every page (/dwm); a list -> only those
+    pages (/dwt)."""
     try:
-        pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=message_id)
+        pdf_bytes = pdf_bytes_cached if pdf_bytes_cached is not None else \
+            await download_tg_file(file_id, chat_id=chat_id, message_id=message_id)
 
         start_time = time.time()
         _last_edit = {"t": 0.0, "pct": -1}
@@ -14698,7 +14722,8 @@ async def handle_dwt_command(msg: dict):
     _spawn_task(_remove_watermark_from_pdf_task(chat_id, file_id, None,
                                                   reply["message_id"], orig_filename,
                                                   page_indices=page_indices,
-                                                  status_msg_id=status_msg_id, job_id=job_id))
+                                                  status_msg_id=status_msg_id, job_id=job_id,
+                                                  pdf_bytes_cached=pdf_bytes_peek))
 
 
 async def handle_header_command(msg: dict):
