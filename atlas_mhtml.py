@@ -1465,6 +1465,28 @@ def _convert_sutonny_spans(node):
             #     left as raw "‚" otherwise, e.g. "ভ‚মিকা".
             t = t.replace("Ð", "ণ্ড").replace("‚", "ূ")
             out = _uc.convert_bijoy_to_unicode(t)
+            # Two more unmapped SutonnyMJ glyphs that leak raw STRAIGHT INTO
+            # THE OUTPUT (confirmed: everything around them already
+            # converts correctly, only these two single glyphs pass through
+            # untouched) -- fixed as a post-process on `out`, not a
+            # pre-substitution on the raw input, because pre-substituting
+            # them broke other already-correct conversions that happen to
+            # contain the same raw byte in a different, already-handled
+            # context (e.g. "¯Íi"->স্তর and "Ae¯'vb"->অবস্থান already
+            # convert correctly on their own; blanket-replacing every "¯"
+            # in the input broke both):
+            #   - "¬" (leftover ্ল l-fola after ক, e.g. "¯‹¬‡i.." ->
+            #     "স্ক¬ে.." -- correct conversion already resolves the স্ক
+            #     part, only the ¬ itself leaks) -> স্ক্লেরেনকাইমা/
+            #     sclerenchyma.
+            #   - "¯øvBg" (ø immediately after ¯, confirmed this specific
+            #     2-char combo leaks both chars as "¯্ল") -> স্লাইম/slime.
+            out = out.replace("¬", "্ল").replace("¯্ল", "স্ল")
+            # Same leaked "¯" glyph, different already-correct surrounding
+            # conversion: "Awf¯ªeY" -> "অভ¯ি্রবণ" (prebase ি and ্র both
+            # already resolved correctly, only the literal ¯ in between
+            # leaks) -> অভিস্রবণ/osmosis.
+            out = out.replace("ভ¯ি্র", "ভিস্র")
             # Same prebase e-kar stranding bug as the প্রোটিন fix below, but
             # for our own hardcoded "Ð"->ণ্ড conjunct specifically: source
             # "Kv‡Ði" (কা + prebase-e-kar +ণ্ড + র) should read কাণ্ডের
@@ -1472,6 +1494,11 @@ def _convert_sutonny_spans(node):
             # as "কােণ্ডর" with the ে stranded BEFORE ণ্ড instead of after
             # it. Move it.
             out = out.replace("কােণ্ড", "কাণ্ডে")
+            # The library also reorders a postbase ি matra across a
+            # following দাঁড়ি (।), e.g. "ভিত্তি।" (noun+ি then দাঁড়ি) comes
+            # out as "ভিত্ত।ি" with the ি stranded AFTER the দাঁড়ি instead
+            # of before it. Move it back.
+            out = re.sub(r'।(ি)(?=\s|$)', r'\1।', out)
             out = out.replace("æ", "ু")
             # unicodeconverter's Bijoy map also mis-places the prebase
             # e-kar (ে) when it's really the left half of an ও-kার split
@@ -1489,6 +1516,11 @@ def _convert_sutonny_spans(node):
             # conjunct, forming ো), for every (possibly multi-conjunct)
             # cluster this pattern appears in.
             out = re.sub(r'ে((?:্.)+)া', r'\1ো', out)
+            # Same stranding bug, narrowly targeted for the one confirmed
+            # case with no trailing া to merge into ো (full general form
+            # over-fired on unrelated conjuncts and caused regressions):
+            # "g~‡`ªi" -> "মূদে্রর" should read "...দ্রের" (ocean's).
+            out = out.replace("দে্র", "দ্রে")
             return out
 
         if joined:
