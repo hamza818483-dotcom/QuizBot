@@ -497,7 +497,8 @@ def aggressive_clean(text):
         while i < len(text):
             if text[i] == marker_char and i + 1 < len(text) and text[i+1] == '{':
                 inner, p = _read_braced_group(text, i + 1)
-                if inner is not None:                    out.append(repl_fn(inner))
+                if inner is not None:
+                    out.append(repl_fn(inner))
                     i = p
                     continue
             if text[i] == marker_char and i + 1 < len(text) and text[i+1] == '(':
@@ -996,7 +997,8 @@ def _format_content_inner(element, img_map):
                 # MathJax renders identically everywhere: \bar{} for a
                 # single letter/digit, \overline{} for a multi-character
                 # base (line-segment notation like AB, or any expression)
-                # since \bar only ever sits over one character in LaTeX.                if len(base_t) == 1:
+                # since \bar only ever sits over one character in LaTeX.
+                if len(base_t) == 1:
                     mover.replace_with(f"$\\bar{{{base_t}}}$")
                 else:
                     mover.replace_with(f"$\\overline{{{base_t}}}$")
@@ -1500,7 +1502,8 @@ def _convert_sutonny_spans(node):
             # following দাঁড়ি (।), e.g. "ভিত্তি।" (noun+ি then দাঁড়ি) comes
             # out as "ভিত্ত।ি" with the ি stranded AFTER the দাঁড়ি instead
             # of before it. Move it back.
-            # Generalized to every matra, not just ি: also confirmed with ে,            # e.g. "কর।ে এদের" -> should read "করে। এদের" (does. These are
+            # Generalized to every matra, not just ি: also confirmed with ে,
+            # e.g. "কর।ে এদের" -> should read "করে। এদের" (does. These are
             # called...), "বল।ে" -> "বলে।" (is called).
             out = re.sub(r'।([িীুূেৈোৌ])(?=\s|$)', r'\1।', out)
             out = out.replace("æ", "ু")
@@ -1999,6 +2002,7 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> 
     _rayvila = _parse_rayvila(soup, img_map, progress_cb)
     if _rayvila is not None and _rayvila["results"]:
         return _rayvila
+
     # RAYVILA (view_result.php exam-result page) — চেনা গেলে এখানেই শেষ
     _rayvila = _parse_rayvila(soup, img_map, progress_cb)
     if _rayvila is not None and _rayvila["results"]:
