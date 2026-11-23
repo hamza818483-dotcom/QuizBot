@@ -14525,9 +14525,9 @@ async def handle_dwm_command(msg: dict):
     if not (reply and reply.get("document")):
         await send_msg(chat_id,
             "📌 Usage: PDF-e reply করে <code>/dwm</code> দিলে watermark remove হবে (সব page)।\n"
-            "নির্দিষ্ট watermark text জানা থাকলে: <code>/dwm WatermarkText</code>\n"
-            "⚠️ /dwm এ page range দেওয়া যায় না — শুধু নির্দিষ্ট page(গুলো) চাইলে "
-            "<code>/dwt 2-3</code> ব্যবহার করো।",
+            "নির্দিষ্ট page(গুলো): <code>/dwm 2-3</code>, <code>/dwm 1,2,5</code>\n"
+            "নির্দিষ্ট watermark text: <code>/dwm WatermarkText</code>\n"
+            "বড় PDF (বেশি page) নিজে থেকেই ছোট ছোট batch-এ ভাগ হয়ে একটা dashboard-এই smoothly process হবে।",
             parse_mode="HTML")
         return
 
@@ -14542,13 +14542,30 @@ async def handle_dwm_command(msg: dict):
         await send_msg(chat_id, f"❌ PDF পড়তে সমস্যা হয়েছে: {e}")
         return
 
-    if total_pages > _DWM_MAX_PAGES:
-        await send_msg(chat_id,
-            f"⚠️ এই PDF-এ {total_pages} page — RAM safety-র জন্য একসাথে সর্বোচ্চ {_DWM_MAX_PAGES} page "
-            f"process করা যায়।\nদয়া করে <code>/dwt</code> দিয়ে ছোট range-এ ভাগ করে পাঠাও, যেমন: "
-            f"<code>/dwt 1-{_DWM_MAX_PAGES}</code>, তারপর <code>/dwt {_DWM_MAX_PAGES+1}-{total_pages}</code>",
-            parse_mode="HTML")
-        return
+    # 2026-11 (user request): /dwm now also accepts a page range/number
+    # exactly like /dwt ("/dwm 2-3", "/dwm 1,2,5") -- only a number/comma/
+    # hyphen-shaped trailing arg is parsed as a range; anything else (real
+    # words) is still treated as a literal watermark_text to search for,
+    # so old-style "/dwm WatermarkText" keeps working unchanged.
+    page_indices = None
+    if dwm_text and re.match(r"^[\d,\-\s]+$", dwm_text):
+        page_indices = _parse_page_spec(dwm_text, total_pages)
+        if not page_indices:
+            await send_msg(chat_id, f"❌ সঠিক page range দাও (PDF-এ মোট {total_pages} page আছে)।", parse_mode="HTML")
+            return
+        dwm_text = None  # range mode -- no literal watermark_text search
+
+    # RAM-safety: no range given + PDF too big for one shot -> auto-chunk
+    # into _DWM_MAX_PAGES-sized batches and run them one after another in
+    # the SAME job, instead of making the user manually call /dwt repeatedly.
+    # An explicit range (page_indices already set) always runs as one job,
+    # even if it's large -- the user picked it deliberately.
+    chunks = [None]
+    if page_indices is None and total_pages > _DWM_MAX_PAGES:
+        chunks = [list(range(start, min(start + _DWM_MAX_PAGES, total_pages)))
+                  for start in range(0, total_pages, _DWM_MAX_PAGES)]
+    elif page_indices is not None:
+        chunks = [page_indices]
 
     job_id = new_job_id(chat_id)
     clear_cancel(chat_id)
@@ -14558,7 +14575,8 @@ async def handle_dwm_command(msg: dict):
     _spawn_task(_remove_watermark_from_pdf_task(chat_id, file_id, dwm_text or None,
                                                   reply["message_id"], orig_filename,
                                                   status_msg_id=status_msg_id, job_id=job_id,
-                                                  pdf_bytes_cached=pdf_bytes_peek))
+                                                  pdf_bytes_cached=pdf_bytes_peek,
+                                                  page_chunks=chunks))
 
 
 _DWM_MAX_PAGES = 80  # RAM-safety cap: beyond this, suggest /dwt in chunks instead of /dwm on the whole file
@@ -14618,12 +14636,26 @@ def _build_dwm_dashboard(file_name: str, done: int, total: int, start_time: floa
 async def _remove_watermark_from_pdf_task(chat_id: int, file_id: str, wm_text: Optional[str],
                                             message_id: int = None, orig_filename: str = None,
                                             page_indices: list = None, status_msg_id: int = None,
-                                            job_id: int = None, pdf_bytes_cached: bytes = None):
+                                            job_id: int = None, pdf_bytes_cached: bytes = None,
+                                            page_chunks: list = None):
     """Download PDF (or reuse an already-downloaded copy via
     pdf_bytes_cached, since both /dwm and /dwt peek the page count first),
     strip watermark page-by-page with a live %/ETA/inline-cancel dashboard,
-    resend. page_indices=None -> every page (/dwm); a list -> only those
-    pages (/dwt)."""
+    resend.
+
+    page_indices=None -> every page in a single pass; a list -> only those
+    pages (/dwt, or a small explicit /dwm range).
+
+    page_chunks (optional): a list of page_indices lists (or [None] for
+    "whole doc, one pass"), run SEQUENTIALLY, each chunk's output feeding
+    the next chunk's input -- so a huge PDF (/dwm with no range, over the
+    RAM-safety cap) auto-batches through _DWM_MAX_PAGES-sized windows in
+    one job/one dashboard instead of needing /dwt called repeatedly by
+    hand, while keeping per-pass peak RAM the same as a single /dwt call.
+    Falls back to the old single-pass behavior when omitted."""
+    if page_chunks is None:
+        page_chunks = [page_indices]
+
     try:
         pdf_bytes = pdf_bytes_cached if pdf_bytes_cached is not None else \
             await download_tg_file(file_id, chat_id=chat_id, message_id=message_id)
@@ -14640,14 +14672,21 @@ async def _remove_watermark_from_pdf_task(chat_id: int, file_id: str, wm_text: O
         # here and hop back onto it with run_coroutine_threadsafe instead.
         _main_loop = asyncio.get_running_loop()
 
+        # Grand totals across every chunk, for one continuous done/total
+        # dashboard instead of it resetting to 0 at each chunk boundary.
+        _chunk_sizes = [len(c) if c is not None else 1 for c in page_chunks]
+        grand_total = sum(_chunk_sizes) or 1
+        grand_done_base = {"v": 0}
+
         def _cancel_check():
             return job_id is not None and CURRENT_JOB_ID.get(chat_id) != job_id or is_cancelled(chat_id)
 
         def _progress(done, total, page_no, stage):
             now = time.time()
-            pct = int(done / total * 100) if total else 0
+            g_done = grand_done_base["v"] + done
+            pct = int(g_done / grand_total * 100) if grand_total else 0
             # Throttle: at most ~1 edit/1.5s, always edit on first/last page.
-            if pct == _last_edit["pct"] and now - _last_edit["t"] < 1.5 and done != total:
+            if pct == _last_edit["pct"] and now - _last_edit["t"] < 1.5 and g_done != grand_total:
                 return
             _last_edit["pct"] = pct
             _last_edit["t"] = now
@@ -14655,15 +14694,19 @@ async def _remove_watermark_from_pdf_task(chat_id: int, file_id: str, wm_text: O
             if status_msg_id:
                 asyncio.run_coroutine_threadsafe(
                     edit_msg(chat_id, status_msg_id,
-                        _build_dwm_dashboard(orig_filename, done, total, start_time, stage_label,
+                        _build_dwm_dashboard(orig_filename, g_done, grand_total, start_time, stage_label,
                                              extra_line=f"📍 Current page: {page_no}"),
                         parse_mode="HTML", reply_markup=_cancel_kb(chat_id, job_id)),
                     _main_loop)
 
         try:
-            clean_bytes = await asyncio.to_thread(
-                remove_watermark_from_pdf_paged, pdf_bytes, wm_text, page_indices,
-                _progress, _cancel_check)
+            working_bytes = pdf_bytes
+            for chunk in page_chunks:
+                working_bytes = await asyncio.to_thread(
+                    remove_watermark_from_pdf_paged, working_bytes, wm_text, chunk,
+                    _progress, _cancel_check)
+                grand_done_base["v"] += len(chunk) if chunk is not None else 1
+            clean_bytes = working_bytes
         except WatermarkCancelled:
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id,
@@ -14679,7 +14722,7 @@ async def _remove_watermark_from_pdf_task(chat_id: int, file_id: str, wm_text: O
         out_name = _tg_safe_filename(orig_filename, default="dewatermarked.pdf")
         name_line = f"📄 {orig_filename}\n" if orig_filename else ""
         pages_line = ""
-        if page_indices is not None:
+        if page_indices is not None and page_chunks == [page_indices]:
             pages_line = f"📍 Pages: {', '.join(str(i + 1) for i in page_indices)}\n"
         send_res = await send_document(chat_id, clean_bytes,
             out_name,
