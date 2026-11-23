@@ -14543,7 +14543,7 @@ async def handle_dwm_command(msg: dict):
         return
 
     # 2026-11 (user request): /dwm now also accepts a page range/number
-    # exactly like /dwt ("/dwm 2-3", "/dwm 1,2,5") -- only a number/comma/
+    # ("/dwm 2-3", "/dwm 1,2,5") -- only a number/comma/
     # hyphen-shaped trailing arg is parsed as a range; anything else (real
     # words) is still treated as a literal watermark_text to search for,
     # so old-style "/dwm WatermarkText" keeps working unchanged.
@@ -14557,7 +14557,7 @@ async def handle_dwm_command(msg: dict):
 
     # RAM-safety: no range given + PDF too big for one shot -> auto-chunk
     # into _DWM_MAX_PAGES-sized batches and run them one after another in
-    # the SAME job, instead of making the user manually call /dwt repeatedly.
+    # the SAME job, instead of the user having to split it manually.
     # An explicit range (page_indices already set) always runs as one job,
     # even if it's large -- the user picked it deliberately.
     chunks = [None]
@@ -14579,11 +14579,11 @@ async def handle_dwm_command(msg: dict):
                                                   page_chunks=chunks))
 
 
-_DWM_MAX_PAGES = 80  # RAM-safety cap: beyond this, suggest /dwt in chunks instead of /dwm on the whole file
+_DWM_MAX_PAGES = 80  # RAM-safety cap: beyond this, auto-chunk into windows of this size
 
 
 def _parse_page_spec(spec: str, total_pages: int) -> list:
-    """'/dwt' er page-range/page-no argument ("3-7", "1,2,5", "3-7,9")
+    """/dwm er page-range/page-no argument ("3-7", "1,2,5", "3-7,9")
     ke 0-based page-index list-e convert kore. Out-of-range/garbage
     token silently skip hoy; result always de-duped + sorted."""
     out = set()
@@ -14607,7 +14607,7 @@ def _parse_page_spec(spec: str, total_pages: int) -> list:
 
 def _build_dwm_dashboard(file_name: str, done: int, total: int, start_time: float, stage: str,
                           extra_line: str = None) -> str:
-    """Premium-design live dashboard for /dwm & /dwt — page done/total,
+    """Premium-design live dashboard for /dwm — page done/total,
     % with progress bar, ETA, elapsed."""
     elapsed = time.time() - start_time
     pct = int(done / total * 100) if total else 0
@@ -14639,19 +14639,20 @@ async def _remove_watermark_from_pdf_task(chat_id: int, file_id: str, wm_text: O
                                             job_id: int = None, pdf_bytes_cached: bytes = None,
                                             page_chunks: list = None):
     """Download PDF (or reuse an already-downloaded copy via
-    pdf_bytes_cached, since both /dwm and /dwt peek the page count first),
+    pdf_bytes_cached, since /dwm peeks the page count first),
     strip watermark page-by-page with a live %/ETA/inline-cancel dashboard,
     resend.
 
     page_indices=None -> every page in a single pass; a list -> only those
-    pages (/dwt, or a small explicit /dwm range).
+    pages (an explicit /dwm range).
 
     page_chunks (optional): a list of page_indices lists (or [None] for
     "whole doc, one pass"), run SEQUENTIALLY, each chunk's output feeding
     the next chunk's input -- so a huge PDF (/dwm with no range, over the
     RAM-safety cap) auto-batches through _DWM_MAX_PAGES-sized windows in
-    one job/one dashboard instead of needing /dwt called repeatedly by
-    hand, while keeping per-pass peak RAM the same as a single /dwt call.
+    one job/one dashboard instead of the user needing to split it into
+    repeated smaller /dwm calls by hand, while keeping per-pass peak RAM
+    the same as a single explicit-range call.
     Falls back to the old single-pass behavior when omitted."""
     if page_chunks is None:
         page_chunks = [page_indices]
@@ -14735,51 +14736,6 @@ async def _remove_watermark_from_pdf_task(chat_id: int, file_id: str, wm_text: O
             await send_msg(chat_id, f"❌ পাঠাতে ব্যর্থ: {err}")
     except Exception as e:
         await send_msg(chat_id, f"❌ De-watermark error: {e}")
-
-
-async def handle_dwt_command(msg: dict):
-    """/dwt <page range or page no> — reply diye kono PDF-e dile, SHUDHU
-    oi page(gulo)-r watermark remove kore dibe (baki page byte-identical
-    thake). Format: /dwt 3-7  ba  /dwt 1,2,5  ba  /dwt 3-7,9"""
-    chat_id = msg["chat"]["id"]
-    text = msg.get("text", "").strip()
-    page_spec = re.sub(r"^/dwt\s*", "", text, flags=re.IGNORECASE).strip()
-    reply = msg.get("reply_to_message")
-
-    if not page_spec or not (reply and reply.get("document")):
-        await send_msg(chat_id,
-            "📌 Usage: PDF-e reply করে <code>/dwt page_range</code> দাও।\n"
-            "উদাহরণ: <code>/dwt 3-7</code>, <code>/dwt 1,2,5</code>, <code>/dwt 3-7,9</code>",
-            parse_mode="HTML")
-        return
-
-    file_id = reply["document"]["file_id"]
-    orig_filename = reply["document"].get("file_name")
-
-    try:
-        import pikepdf as _pikepdf
-        pdf_bytes_peek = await download_tg_file(file_id, chat_id=chat_id, message_id=reply["message_id"])
-        total_pages = len(_pikepdf.Pdf.open(BytesIO(pdf_bytes_peek)).pages)
-    except Exception as e:
-        await send_msg(chat_id, f"❌ PDF পড়তে সমস্যা হয়েছে: {e}")
-        return
-
-    page_indices = _parse_page_spec(page_spec, total_pages)
-    if not page_indices:
-        await send_msg(chat_id, f"❌ সঠিক page range দাও (PDF-এ মোট {total_pages} page আছে)।", parse_mode="HTML")
-        return
-
-    job_id = new_job_id(chat_id)
-    clear_cancel(chat_id)
-    status_r = await send_msg(chat_id,
-        _build_dwm_dashboard(orig_filename, 0, len(page_indices), time.time(), "⏳ শুরু হচ্ছে..."),
-        parse_mode="HTML", reply_markup=_cancel_kb(chat_id, job_id))
-    status_msg_id = status_r.get("result", {}).get("message_id")
-    _spawn_task(_remove_watermark_from_pdf_task(chat_id, file_id, None,
-                                                  reply["message_id"], orig_filename,
-                                                  page_indices=page_indices,
-                                                  status_msg_id=status_msg_id, job_id=job_id,
-                                                  pdf_bytes_cached=pdf_bytes_peek))
 
 
 async def handle_header_command(msg: dict):
@@ -41024,11 +40980,6 @@ async def handle_message(msg: dict):
             await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_dwm_command(msg))
-    elif text.startswith("/dwt"):
-        if not is_auth:
-            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
-            return
-        _spawn_command_task(uid, handle_dwt_command(msg))
     elif text.startswith("/h") and (text == "/h" or text.startswith("/h ") or text.startswith("/h\n")):
         if not is_auth:
             await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
