@@ -1360,7 +1360,7 @@ def _convert_sutonny_spans(node):
     if node is None:
         return node
     try:
-        import unicodeconverter as _uc
+        import bijoy_unicode as _uc
     except Exception:
         return node
 
@@ -1429,59 +1429,18 @@ def _convert_sutonny_spans(node):
         joined = "".join(raw_parts)
 
         def _bijoy_convert(t):
-            # The external `unicodeconverter` package's Bijoy map is missing
-            # two real entries, confirmed against actual SutonnyMJ page bytes:
-            #   - "¤œ" (an alternate non-connecting glyph for ম + œ, e.g. in
-            #     "wb¤œ" -> নিম্ন) isn't recognized as the same ম্ন conjunct
-            #     that "gœ" already correctly maps to -- pre-normalize it to
-            #     the working "gœ" spelling before handing off to the library.
-            #   - "æ" (the ু matra specifically after a precomposed ref/
-            #     conjunct glyph, e.g. "Îæ" after ত্র -> ত্রু, "aªæ" after
-            #     ধ্র -> ধ্রু) has no mapping at all and leaks straight
-            #     through unconverted -- "æ" is never a valid Bangla output
-            #     character, so replacing any leftover "æ" post-conversion
-            #     is a safe, targeted fix.
-            t = t.replace("¤œ", "gœ")
-            # Two more real SutonnyMJ glyphs the external library's Bijoy
-            # map has no entry for at all (confirmed: pass straight through
-            # unconverted instead of raising) -- pre-substitute their
-            # correct Unicode directly; unmapped Unicode Bangla chars pass
-            # through convert_bijoy_to_unicode() untouched, so this is safe:
-            #   - "¯œ" (স্ন conjunct, e.g. in "¯œvqy‡Kvl" -> স্নায়ুকোষ/
-            #     nerve-cell) -- left as raw "¯œ" otherwise, e.g. "অ¯œায়ুকোষ"
-            #   - "ƒ" (দীর্ঘ-উ/ূ matra specifically after a ref/ল-fola
-            #     conjunct, e.g. "åƒ" after ভ্র -> ভ্রূ as in "åƒY" -> ভ্রূণ/
-            #     embryo) -- left as raw "ƒ" otherwise, e.g. "ভ্রƒণ"
-            t = t.replace("¯œ", "স্ন").replace("ƒ", "ূ")
-            # Two more unmapped SutonnyMJ glyphs, confirmed leaking straight
-            # through unconverted (same family as ¯œ/ƒ above):
-            #   - "Ð" (ণ্ড conjunct, e.g. "`Ðvqgvb" -> দণ্ডায়মান/standing,
-            #     "cÎLÐK" -> পত্রখণ্ডক/leaf-segment, "Kv‡Ði" -> কাণ্ডর/stem's,
-            #     "cY©KvÐ" -> পর্ণকাণ্ড) -- left as raw "Ð" otherwise, e.g.
-            #     "পত্রখÐক".
-            #   - "‚" (দীর্ঘ-উ/ূ matra after a ভ/ক/চ-type base, e.g.
-            #     "f‚wgKv" -> ভূমিকা/role, "cÖwZK‚j" -> প্রতিকূল/unfavorable,
-            #     "f‚Uvb" -> ভূটান/Bhutan, "P‚ovšÍ" -> চূড়ান্ত/ultimate) --
-            #     left as raw "‚" otherwise, e.g. "ভ‚মিকা".
-            t = t.replace("Ð", "ণ্ড").replace("‚", "ূ")
+            # All previously-missing SutonnyMJ glyphs (¤œ, ¯œ, æ, ƒ, Ð, ‚, ¬)
+            # are now proper entries in our vendored bijoy_unicode map
+            # (bijoy_unicode/maps/__init__.py) and go through the normal
+            # segmentation + rearrange pipeline like every other glyph --
+            # no ad-hoc pre/post string-patching needed for them any more.
             out = _uc.convert_bijoy_to_unicode(t)
-            # Two more unmapped SutonnyMJ glyphs that leak raw STRAIGHT INTO
-            # THE OUTPUT (confirmed: everything around them already
-            # converts correctly, only these two single glyphs pass through
-            # untouched) -- fixed as a post-process on `out`, not a
-            # pre-substitution on the raw input, because pre-substituting
-            # them broke other already-correct conversions that happen to
-            # contain the same raw byte in a different, already-handled
-            # context (e.g. "¯Íi"->স্তর and "Ae¯'vb"->অবস্থান already
-            # convert correctly on their own; blanket-replacing every "¯"
-            # in the input broke both):
-            #   - "¬" (leftover ্ল l-fola after ক, e.g. "¯‹¬‡i.." ->
-            #     "স্ক¬ে.." -- correct conversion already resolves the স্ক
-            #     part, only the ¬ itself leaks) -> স্ক্লেরেনকাইমা/
-            #     sclerenchyma.
-            #   - "¯øvBg" (ø immediately after ¯, confirmed this specific
-            #     2-char combo leaks both chars as "¯্ল") -> স্লাইম/slime.
-            out = out.replace("¬", "্ল").replace("¯্ল", "স্ল")
+            # "¯øvBg" (স্লাইম/slime): ø immediately after ¯ is a specific
+            # glyph-ORDER quirk (not a missing-glyph issue) where the
+            # pipeline's segmentation leaves স্ল split across the two
+            # source glyphs in reverse order; confirmed only on this exact
+            # adjacency, so fixed as a targeted post-process reorder.
+            out = out.replace("¯্ল", "স্ল")
             # Same leaked "¯" glyph, general form (not word-locked): any
             # consonant + leaked ¯ + prebase ি + conjunct, e.g.
             # "Awf¯ªeY" -> "অভ¯ি্রবণ" (prebase ি and ্র already resolved
