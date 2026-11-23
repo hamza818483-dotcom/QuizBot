@@ -315,9 +315,9 @@ def aggressive_clean(text):
     # "র \u200d ্য..." must become the correctly joined "র\u200d্য...".
     # Only whitespace immediately around a Bengali ZWJ+virama sequence is
     # removed; ordinary word spacing is preserved.
-    text = re.sub(r'([\u0980-\u09FF])\\s*\u200d\\s*(?=\u09CD)', r'\\1\u200d', text)
-    text = re.sub(r'(?<=\u200d)\\s*(?=\u09CD)', '', text)
-    text = re.sub(r'(?<=\u09CD)\\s+(?=[\u0980-\u09FF])', '', text)
+    text = re.sub(r'([\u0980-\u09FF])\s*\u200d\s*(?=\u09CD)', r'\1\u200d', text)
+    text = re.sub(r'(?<=\u200d)\s*(?=\u09CD)', '', text)
+    text = re.sub(r'(?<=\u09CD)\s+(?=[\u0980-\u09FF])', '', text)
     # Unit-vector "hat" notation written as a literal ASCII caret after the
     # letter with a space (e.g. "i ^", "j ^") -- not a Unicode combining
     # character itself, so the arrow-diacritic regex above doesn't catch it.
