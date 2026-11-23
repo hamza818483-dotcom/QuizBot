@@ -1442,6 +1442,17 @@ def _convert_sutonny_spans(node):
             #     character, so replacing any leftover "æ" post-conversion
             #     is a safe, targeted fix.
             t = t.replace("¤œ", "gœ")
+            # Two more real SutonnyMJ glyphs the external library's Bijoy
+            # map has no entry for at all (confirmed: pass straight through
+            # unconverted instead of raising) -- pre-substitute their
+            # correct Unicode directly; unmapped Unicode Bangla chars pass
+            # through convert_bijoy_to_unicode() untouched, so this is safe:
+            #   - "¯œ" (স্ন conjunct, e.g. in "¯œvqy‡Kvl" -> স্নায়ুকোষ/
+            #     nerve-cell) -- left as raw "¯œ" otherwise, e.g. "অ¯œায়ুকোষ"
+            #   - "ƒ" (দীর্ঘ-উ/ূ matra specifically after a ref/ল-fola
+            #     conjunct, e.g. "åƒ" after ভ্র -> ভ্রূ as in "åƒY" -> ভ্রূণ/
+            #     embryo) -- left as raw "ƒ" otherwise, e.g. "ভ্রƒণ"
+            t = t.replace("¯œ", "স্ন").replace("ƒ", "ূ")
             out = _uc.convert_bijoy_to_unicode(t)
             out = out.replace("æ", "ু")
             # unicodeconverter's Bijoy map also mis-places the prebase
