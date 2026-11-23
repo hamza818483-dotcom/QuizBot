@@ -1377,6 +1377,34 @@ def _convert_sutonny_spans(node):
         # so it shouldn't break a Bijoy run's context -- skip over it.
         return not _is_sutonny(s) and not s.get_text().strip()
 
+    def _bare_text_between(a, b):
+        # Real (non-whitespace) text sitting OUTSIDE any span, directly
+        # between sibling spans `a` and `b` in actual DOM order -- e.g.
+        # "DNA <span sutonny>...</span>ATGC <span sutonny>...</span>mRNA
+        # <span sutonny>...</span>" has the bare English words "ATGC" and
+        # "mRNA" interleaved between Bijoy fragments. find_all('span',...)
+        # only returns the <span> tags themselves and is blind to these
+        # bare NavigableStrings, so without this check the run-bridging
+        # loop below would wrongly treat the three SutonnyMJ spans as
+        # directly adjacent, joining "Abyµg "+"n‡j "+"Gi †em..." into one
+        # converted sentence on the first span and blanking the rest --
+        # which drags "ATGC"/"mRNA" out of their real mid-sentence position
+        # (they'd get get_text()-flattened to the END, after the whole
+        # converted run) and scrambles word order. A run must stop here,
+        # not bridge over it, so each fragment converts (and stays
+        # positioned) independently around the bare text.
+        for sib in a.next_siblings:
+            if sib is b:
+                return False
+            if getattr(sib, 'name', None) is None and str(sib).strip():
+                return True
+            # an intervening tag that isn't `b` itself (e.g. another
+            # element entirely) also means a/b aren't directly adjacent;
+            # don't keep scanning past it.
+            if getattr(sib, 'name', None) is not None:
+                return False
+        return False
+
     i = 0
     while i < n:
         if not _is_sutonny(all_spans[i]):
@@ -1386,6 +1414,8 @@ def _convert_sutonny_spans(node):
         all_in_run = [all_spans[i]]  # run spans + bridging gap spans, in order (defines join text)
         j = i + 1
         while j < n:
+            if _bare_text_between(all_spans[j - 1], all_spans[j]):
+                break
             if _is_sutonny(all_spans[j]):
                 run.append(all_spans[j])
                 all_in_run.append(all_spans[j])
