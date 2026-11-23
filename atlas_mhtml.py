@@ -1443,7 +1443,24 @@ def _convert_sutonny_spans(node):
             #     is a safe, targeted fix.
             t = t.replace("¤œ", "gœ")
             out = _uc.convert_bijoy_to_unicode(t)
-            return out.replace("æ", "ু")
+            out = out.replace("æ", "ু")
+            # unicodeconverter's Bijoy map also mis-places the prebase
+            # e-kar (ে) when it's really the left half of an ও-kার split
+            # around a conjunct: a source glyph run like "†cÖv" (pre-base
+            # vowel + conjunct + aa-kar) comes out as consonant+ে+conjunct
+            # +া ("পে্রা") instead of consonant+conjunct+ো ("প্রো") -- the
+            # ে and া never got merged into ো and stayed on the wrong side
+            # of the conjunct. Seen across common science vocabulary:
+            # প্রোটিন/প্রোটোপ্লাজম/প্রোটোপ্লাজম (protein/protoplasm),
+            # প্রোফেজ/প্রোফেজ (prophase), প্রোপাগেশন (propagation),
+            # নাইট্রোজেন/হাইড্রোজেন (nitrogen/hydrogen), হাইড্রোফিলিক
+            # (hydrophilic), স্ট্রোমা (stroma), স্ট্রোবিলাস (strobilus),
+            # গ্লোবিউলিন (globulin), প্রোথ্যালাস (prothallus). Relocate the
+            # stray ে to just before the া it belongs with (after the
+            # conjunct, forming ো), for every (possibly multi-conjunct)
+            # cluster this pattern appears in.
+            out = re.sub(r'ে((?:্.)+)া', r'\1ো', out)
+            return out
 
         if joined:
             try:
