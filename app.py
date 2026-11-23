@@ -14510,6 +14510,88 @@ async def _apply_watermark_to_pdf(chat_id: int, file_id: str, wm_text: str, mess
         await send_msg(chat_id, f"❌ Watermark error: {e}")
 
 
+# Per-PAGE de-watermark disk cache: once a specific page of a specific PDF
+# (identified by its stable file_unique_id) has been cleaned, re-running
+# /dwm on that same file -- whole doc, a different range that happens to
+# overlap, whatever -- reuses the already-cleaned page instead of redoing
+# the (expensive) pikepdf scrub + PyMuPDF redaction/baked-image cleanup for
+# it. Keyed by (file_unique_id, watermark_text-or-"", page_idx) since a page
+# cleaned for one literal watermark_text search isn't necessarily clean for
+# a different one. Content-addressed on disk, same index.json pattern as
+# _PDF_DISK_CACHE_DIR above, so it also survives process restarts.
+_DWM_PAGE_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dwm_page_cache")
+_DWM_PAGE_CACHE_MAX = 4000  # cached single-page PDFs on disk
+_DWM_PAGE_INDEX_PATH = os.path.join(_DWM_PAGE_CACHE_DIR, "_index.json")
+
+
+def _dwm_cache_key(file_unique_id: str, watermark_text: Optional[str], page_idx: int) -> str:
+    return f"{file_unique_id}:{watermark_text or ''}:{page_idx}"
+
+
+def _dwm_page_index_load() -> dict:
+    try:
+        with open(_DWM_PAGE_INDEX_PATH, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _dwm_page_index_save(idx: dict) -> None:
+    try:
+        os.makedirs(_DWM_PAGE_CACHE_DIR, exist_ok=True)
+        with open(_DWM_PAGE_INDEX_PATH, "w") as f:
+            json.dump(idx, f)
+    except Exception as e:
+        logger.warning(f"[DWM PageCache] index save failed: {e}")
+
+
+def _dwm_page_cache_get(file_unique_id: str, watermark_text: Optional[str], page_idx: int):
+    if not file_unique_id:
+        return None
+    idx = _dwm_page_index_load()
+    sha = idx.get(_dwm_cache_key(file_unique_id, watermark_text, page_idx))
+    if not sha:
+        return None
+    path = os.path.join(_DWM_PAGE_CACHE_DIR, f"{sha}.pdf")
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+        os.utime(path, None)
+        return data
+    except Exception:
+        return None
+
+
+def _dwm_page_cache_put(file_unique_id: str, watermark_text: Optional[str], page_idx: int, data: bytes) -> None:
+    if not file_unique_id or not data:
+        return
+    try:
+        os.makedirs(_DWM_PAGE_CACHE_DIR, exist_ok=True)
+        sha = hashlib.sha256(data).hexdigest()
+        path = os.path.join(_DWM_PAGE_CACHE_DIR, f"{sha}.pdf")
+        if not os.path.exists(path):
+            with open(path, "wb") as f:
+                f.write(data)
+        idx = _dwm_page_index_load()
+        idx[_dwm_cache_key(file_unique_id, watermark_text, page_idx)] = sha
+        _dwm_page_index_save(idx)
+        files = [f for f in os.listdir(_DWM_PAGE_CACHE_DIR) if f.endswith(".pdf")]
+        if len(files) > _DWM_PAGE_CACHE_MAX:
+            files.sort(key=lambda f: os.path.getmtime(os.path.join(_DWM_PAGE_CACHE_DIR, f)))
+            for f in files[:len(files) - _DWM_PAGE_CACHE_MAX]:
+                evicted_sha = f[:-4]
+                try:
+                    os.remove(os.path.join(_DWM_PAGE_CACHE_DIR, f))
+                except Exception:
+                    pass
+                for k, v in list(idx.items()):
+                    if v == evicted_sha:
+                        idx.pop(k, None)
+            _dwm_page_index_save(idx)
+    except Exception as e:
+        logger.warning(f"[DWM PageCache] write failed: {e}")
+
+
 async def handle_dwm_command(msg: dict):
     """/dwm (optional: exact watermark text) — reply diye kono PDF-e dile
     sheI PDF theke watermark remove kore dibe.
@@ -14532,6 +14614,7 @@ async def handle_dwm_command(msg: dict):
         return
 
     file_id = reply["document"]["file_id"]
+    file_unique_id = reply["document"].get("file_unique_id")
     orig_filename = reply["document"].get("file_name")
 
     try:
@@ -14574,9 +14657,11 @@ async def handle_dwm_command(msg: dict):
     status_msg_id = status_r.get("result", {}).get("message_id")
     _spawn_task(_remove_watermark_from_pdf_task(chat_id, file_id, dwm_text or None,
                                                   reply["message_id"], orig_filename,
+                                                  page_indices=page_indices,
                                                   status_msg_id=status_msg_id, job_id=job_id,
                                                   pdf_bytes_cached=pdf_bytes_peek,
-                                                  page_chunks=chunks))
+                                                  page_chunks=chunks,
+                                                  file_unique_id=file_unique_id))
 
 
 _DWM_MAX_PAGES = 80  # RAM-safety cap: beyond this, auto-chunk into windows of this size
@@ -14637,7 +14722,7 @@ async def _remove_watermark_from_pdf_task(chat_id: int, file_id: str, wm_text: O
                                             message_id: int = None, orig_filename: str = None,
                                             page_indices: list = None, status_msg_id: int = None,
                                             job_id: int = None, pdf_bytes_cached: bytes = None,
-                                            page_chunks: list = None):
+                                            page_chunks: list = None, file_unique_id: str = None):
     """Download PDF (or reuse an already-downloaded copy via
     pdf_bytes_cached, since /dwm peeks the page count first),
     strip watermark page-by-page with a live %/ETA/inline-cancel dashboard,
@@ -14700,12 +14785,29 @@ async def _remove_watermark_from_pdf_task(chat_id: int, file_id: str, wm_text: O
                         parse_mode="HTML", reply_markup=_cancel_kb(chat_id, job_id)),
                     _main_loop)
 
+        # Per-page disk cache (file_unique_id + watermark_text + page_idx):
+        # a page cleaned in an earlier /dwm run on this same file is reused
+        # instead of being re-scrubbed/re-redacted.
+        _cache_get = (lambda idx: _dwm_page_cache_get(file_unique_id, wm_text, idx)) \
+            if file_unique_id else None
+        _cache_put = (lambda idx, data: _dwm_page_cache_put(file_unique_id, wm_text, idx, data)) \
+            if file_unique_id else None
+
         try:
             working_bytes = pdf_bytes
-            for chunk in page_chunks:
+            is_last_chunk_idx = len(page_chunks) - 1
+            for _ci, chunk in enumerate(page_chunks):
+                # Only the explicit user-requested range (single-chunk case,
+                # i.e. page_indices was given directly) should ever shrink
+                # the output to just those pages -- auto-chunked whole-doc
+                # runs must keep passing the FULL doc between chunks so later
+                # chunks' page indices stay correct, and only the final
+                # result is the whole (fully processed) document.
+                _extract_this_pass = (page_indices is not None and chunk == page_indices
+                                       and _ci == is_last_chunk_idx)
                 working_bytes = await asyncio.to_thread(
                     remove_watermark_from_pdf_paged, working_bytes, wm_text, chunk,
-                    _progress, _cancel_check)
+                    _progress, _cancel_check, _cache_get, _cache_put, _extract_this_pass)
                 grand_done_base["v"] += len(chunk) if chunk is not None else 1
             clean_bytes = working_bytes
         except WatermarkCancelled:

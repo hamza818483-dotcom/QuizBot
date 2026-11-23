@@ -3523,7 +3523,9 @@ class WatermarkCancelled(Exception):
 
 def remove_watermark_from_pdf_paged(pdf_bytes: bytes, watermark_text: str = None,
                                      page_indices: list = None,
-                                     progress_cb=None, cancel_cb=None) -> bytes:
+                                     progress_cb=None, cancel_cb=None,
+                                     cache_get_cb=None, cache_put_cb=None,
+                                     extract_only: bool = False) -> bytes:
     """Page-by-page variant of remove_watermark_from_pdf(), for live
     dashboards (/dwm, /dwt). Same 3-stage pipeline (pikepdf content-stream
     scrub -> PyMuPDF text/geometry redaction -> per-page baked/scanned
@@ -3536,6 +3538,16 @@ def remove_watermark_from_pdf_paged(pdf_bytes: bytes, watermark_text: str = None
         per-page step finishes (stage is "stageA" or "stageB").
     cancel_cb(): called between pages/stages; if it returns True, raises
         WatermarkCancelled immediately (no corrupt/partial file returned).
+
+    cache_get_cb(page_idx) -> single-page PDF bytes (already de-watermarked)
+        or None: checked BEFORE processing each target page; a hit skips
+        both stage A and stage B for that page entirely.
+    cache_put_cb(page_idx, single_page_pdf_bytes): called right after a
+        page is freshly processed (cache miss), so the caller can persist
+        it for next time. Never called on a cache hit.
+    extract_only: if True, the returned PDF contains ONLY the pages in
+        page_indices (in that order), not the full original document with
+        the rest left untouched. Ignored when page_indices is None.
     """
     import io as _io
     import pikepdf
@@ -3552,8 +3564,24 @@ def remove_watermark_from_pdf_paged(pdf_bytes: bytes, watermark_text: str = None
     total = len(targets) or 1
     done = 0
 
+    # Pages already de-watermarked in an earlier run (same file_unique_id +
+    # same watermark_text/range mode) come back pre-cleaned as single-page
+    # PDF bytes -- skip stage A/B entirely for those and splice them in
+    # afterwards, instead of re-running the (expensive) scrub+redact work.
+    cache_hits = {}
+    if cache_get_cb:
+        for idx in list(targets):
+            try:
+                hit = cache_get_cb(idx)
+            except Exception:
+                hit = None
+            if hit:
+                cache_hits[idx] = hit
+
+    stageA_targets = targets - set(cache_hits)
+
     for idx, page in enumerate(pdf.pages):
-        if idx not in targets:
+        if idx not in stageA_targets:
             continue
         if cancel_cb and cancel_cb():
             pdf.close()
@@ -3612,6 +3640,16 @@ def remove_watermark_from_pdf_paged(pdf_bytes: bytes, watermark_text: str = None
             except Exception:
                 pass
 
+    # Cache hits count toward progress too (as instant "stageA" completions)
+    # so the dashboard's done/total still reaches `total` correctly.
+    for idx in cache_hits:
+        done += 1
+        if progress_cb:
+            try:
+                progress_cb(done, total, idx + 1, "stageA")
+            except Exception:
+                pass
+
     buf = _io.BytesIO()
     pdf.save(buf)
     working = buf.getvalue()
@@ -3619,9 +3657,10 @@ def remove_watermark_from_pdf_paged(pdf_bytes: bytes, watermark_text: str = None
 
     # ---------- Stage B + per-page Stage C: PyMuPDF text redaction + baked-image cleanup ----------
     doc = fitz.open(stream=working, filetype="pdf")
-    done = 0
+    stageB_targets = targets - set(cache_hits)
+    done = len(cache_hits)  # cache hits already "done" from stage A's perspective
     for pno in range(len(doc)):
-        if pno not in targets:
+        if pno not in stageB_targets:
             continue
         if cancel_cb and cancel_cb():
             doc.close()
@@ -3667,12 +3706,56 @@ def remove_watermark_from_pdf_paged(pdf_bytes: bytes, watermark_text: str = None
             import gc as _gc
             _gc.collect()
 
+        if cache_put_cb:
+            try:
+                single_buf = _io.BytesIO()
+                single_doc = fitz.open()
+                single_doc.insert_pdf(doc, from_page=pno, to_page=pno)
+                single_doc.save(single_buf, garbage=4, deflate=True, clean=True)
+                single_doc.close()
+                cache_put_cb(pno, single_buf.getvalue())
+            except Exception as pe:
+                logger.warning(f"[DeWatermark/paged] cache_put skipped p{pno+1}: {pe}")
+
         done += 1
         if progress_cb:
             try:
                 progress_cb(done, total, pno + 1, "stageB")
             except Exception:
                 pass
+
+    # Splice cache-hit pages (fully pre-cleaned single-page PDFs from an
+    # earlier run) back into the working document at their original index,
+    # replacing the byte-identical-but-still-watermarked page that's there.
+    for idx, hit_bytes in cache_hits.items():
+        try:
+            hit_doc = fitz.open(stream=hit_bytes, filetype="pdf")
+            doc.delete_page(idx)
+            doc.insert_pdf(hit_doc, start_at=idx)
+            hit_doc.close()
+        except Exception as se:
+            logger.warning(f"[DeWatermark/paged] cache splice failed p{idx+1}: {se}")
+        if progress_cb:
+            try:
+                progress_cb(done, total, idx + 1, "stageB")
+            except Exception:
+                pass
+
+    if extract_only and page_indices is not None:
+        # Keep ONLY the requested pages, in the order given, dropping
+        # everything else -- used by /dwm when a specific range was asked
+        # for, instead of returning the whole document with just those
+        # pages cleaned.
+        keep_sorted = sorted(set(page_indices))
+        drop = [p for p in range(len(doc)) if p not in keep_sorted]
+        if drop:
+            doc.delete_pages(drop)
+        if len(keep_sorted) > 1 and page_indices != keep_sorted:
+            # Re-order to match the user's exact requested sequence
+            # (delete_pages already sorted ascending above; select() can
+            # reorder/duplicate pages freely).
+            remap = {orig: new for new, orig in enumerate(keep_sorted)}
+            doc.select([remap[p] for p in page_indices])
 
     out = doc.tobytes(garbage=4, deflate=True, clean=True)
     doc.close()
