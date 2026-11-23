@@ -14,6 +14,7 @@ import base64
 import uuid
 import logging
 import urllib.parse
+import unicodedata
 
 import csv
 import httpx
@@ -1435,6 +1436,27 @@ def _convert_sutonny_spans(node):
             # segmentation + rearrange pipeline like every other glyph --
             # no ad-hoc pre/post string-patching needed for them any more.
             out = _uc.convert_bijoy_to_unicode(t)
+            # Unicode canonical normalization: Bijoy conversion can leave Bengali
+            # vowel signs in decomposed form (e.g. ে + া instead of ো).
+            # NFC is lossless and only canonicalizes equivalent sequences.
+            out = unicodedata.normalize("NFC", out)
+
+            # Conservative repairs for known matra/conjunct ordering defects
+            # observed in real SutonnyMJ output. These operate on structural
+            # sequences, not whole words, and only when the matra is stranded
+            # before the conjunct that it belongs to.
+            # ডি্র -> ড্রি (e.g. মাইটোকন্ডি্রয়া -> মাইটোকন্ড্রিয়া)
+            out = re.sub(r'([ক-হড়ঢ়য়])ি(্[ক-হড়ঢ়য়])', r'\1\2ি', out)
+            # তু্য -> ত্যু (u-kar stranded before ্য)
+            out = re.sub(r'([ক-হড়ঢ়য়])([ুূ])(্য)', r'\1\3\2', out)
+            # Specific legacy caret leak seen in "শ^েত": caret represents
+            # the ব্ conjunct in this context; don't globally rewrite ^,
+            # because it may be legitimate math notation.
+            out = out.replace("শ^ে", "শ্বে")
+
+            # Normalize again after matra relocation so canonically-equivalent
+            # Bengali vowel signs are composed consistently.
+            out = unicodedata.normalize("NFC", out)
             # "¯øvBg" (স্লাইম/slime): ø immediately after ¯ is a specific
             # glyph-ORDER quirk (not a missing-glyph issue) where the
             # pipeline's segmentation leaves স্ল split across the two
