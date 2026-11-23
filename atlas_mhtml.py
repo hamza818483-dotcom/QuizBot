@@ -1453,7 +1453,25 @@ def _convert_sutonny_spans(node):
             #     conjunct, e.g. "åƒ" after ভ্র -> ভ্রূ as in "åƒY" -> ভ্রূণ/
             #     embryo) -- left as raw "ƒ" otherwise, e.g. "ভ্রƒণ"
             t = t.replace("¯œ", "স্ন").replace("ƒ", "ূ")
+            # Two more unmapped SutonnyMJ glyphs, confirmed leaking straight
+            # through unconverted (same family as ¯œ/ƒ above):
+            #   - "Ð" (ণ্ড conjunct, e.g. "`Ðvqgvb" -> দণ্ডায়মান/standing,
+            #     "cÎLÐK" -> পত্রখণ্ডক/leaf-segment, "Kv‡Ði" -> কাণ্ডর/stem's,
+            #     "cY©KvÐ" -> পর্ণকাণ্ড) -- left as raw "Ð" otherwise, e.g.
+            #     "পত্রখÐক".
+            #   - "‚" (দীর্ঘ-উ/ূ matra after a ভ/ক/চ-type base, e.g.
+            #     "f‚wgKv" -> ভূমিকা/role, "cÖwZK‚j" -> প্রতিকূল/unfavorable,
+            #     "f‚Uvb" -> ভূটান/Bhutan, "P‚ovšÍ" -> চূড়ান্ত/ultimate) --
+            #     left as raw "‚" otherwise, e.g. "ভ‚মিকা".
+            t = t.replace("Ð", "ণ্ড").replace("‚", "ূ")
             out = _uc.convert_bijoy_to_unicode(t)
+            # Same prebase e-kar stranding bug as the প্রোটিন fix below, but
+            # for our own hardcoded "Ð"->ণ্ড conjunct specifically: source
+            # "Kv‡Ði" (কা + prebase-e-kar +ণ্ড + র) should read কাণ্ডের
+            # (card/stem's -- a normal postbase e-kar ending) but comes out
+            # as "কােণ্ডর" with the ে stranded BEFORE ণ্ড instead of after
+            # it. Move it.
+            out = out.replace("কােণ্ড", "কাণ্ডে")
             out = out.replace("æ", "ু")
             # unicodeconverter's Bijoy map also mis-places the prebase
             # e-kar (ে) when it's really the left half of an ও-kার split
