@@ -14524,8 +14524,10 @@ async def handle_dwm_command(msg: dict):
 
     if not (reply and reply.get("document")):
         await send_msg(chat_id,
-            "📌 Usage: PDF-e reply করে <code>/dwm</code> দিলে watermark remove হবে।\n"
-            "নির্দিষ্ট watermark text জানা থাকলে: <code>/dwm WatermarkText</code>",
+            "📌 Usage: PDF-e reply করে <code>/dwm</code> দিলে watermark remove হবে (সব page)।\n"
+            "নির্দিষ্ট watermark text জানা থাকলে: <code>/dwm WatermarkText</code>\n"
+            "⚠️ /dwm এ page range দেওয়া যায় না — শুধু নির্দিষ্ট page(গুলো) চাইলে "
+            "<code>/dwt 2-3</code> ব্যবহার করো।",
             parse_mode="HTML")
         return
 
@@ -14628,6 +14630,15 @@ async def _remove_watermark_from_pdf_task(chat_id: int, file_id: str, wm_text: O
 
         start_time = time.time()
         _last_edit = {"t": 0.0, "pct": -1}
+        # BUGFIX: remove_watermark_from_pdf_paged runs inside asyncio.to_thread
+        # -- a REAL OS thread with no running event loop of its own. The old
+        # code called _spawn_task() (asyncio.create_task) from in there, which
+        # silently raised "no running event loop" every single time (swallowed
+        # by core.py's try/except around progress_cb), so the dashboard just
+        # sat frozen at 0/total for the entire job even though processing was
+        # progressing normally underneath. Capture the REAL (calling) loop
+        # here and hop back onto it with run_coroutine_threadsafe instead.
+        _main_loop = asyncio.get_running_loop()
 
         def _cancel_check():
             return job_id is not None and CURRENT_JOB_ID.get(chat_id) != job_id or is_cancelled(chat_id)
@@ -14642,10 +14653,12 @@ async def _remove_watermark_from_pdf_task(chat_id: int, file_id: str, wm_text: O
             _last_edit["t"] = now
             stage_label = "🧹 Content-stream scrub" if stage == "stageA" else "🎯 Text/image redaction"
             if status_msg_id:
-                _spawn_task(edit_msg(chat_id, status_msg_id,
-                    _build_dwm_dashboard(orig_filename, done, total, start_time, stage_label,
-                                         extra_line=f"📍 Current page: {page_no}"),
-                    parse_mode="HTML", reply_markup=_cancel_kb(chat_id, job_id)))
+                asyncio.run_coroutine_threadsafe(
+                    edit_msg(chat_id, status_msg_id,
+                        _build_dwm_dashboard(orig_filename, done, total, start_time, stage_label,
+                                             extra_line=f"📍 Current page: {page_no}"),
+                        parse_mode="HTML", reply_markup=_cancel_kb(chat_id, job_id)),
+                    _main_loop)
 
         try:
             clean_bytes = await asyncio.to_thread(
