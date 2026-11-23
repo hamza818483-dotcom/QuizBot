@@ -327,6 +327,29 @@ bijoy_to_unicode = {
     '¬': '্ল',    # leftover ল-fola (্ল) after ক in a স্ক্ল-type run
 }
 
+# Every CP1252 high byte (0x80-0x9F Windows-specific + 0xA0-0xFF Latin-1
+# supplement) that legacy Bijoy/SutonnyMJ source bytes decode into. Used as
+# a post-conversion safety net: any of these chars still present in output
+# AFTER conversion means some glyph leaked through unmapped (either not in
+# bijoy_pre_map/bijoy_to_unicode at all, or a 2+ byte combo our segmentation
+# didn't catch). A handful of these positions are not used by SutonnyMJ at
+# all (rare Western punctuation slots) and may never appear in real data;
+# the check flags them anyway so a genuine new leak gets caught immediately
+# instead of waiting for a manual bug report on a specific word.
+CP1252_HIGH_BYTES = frozenset(
+    bytes([b]).decode("cp1252") for b in list(range(0x80, 0xA0)) + list(range(0xA0, 0x100))
+    if bytes([b]).decode("cp1252", errors="ignore")
+)
+
+def find_unmapped_glyphs(converted_text: str) -> set:
+    """Returns the set of raw CP1252 high-byte chars still present in
+    already-converted output -- i.e. glyphs that leaked through the
+    Bijoy->Unicode conversion unmapped. Empty set means clean conversion.
+    Callers should log (not silently drop) any non-empty result so new
+    unmapped glyphs surface immediately instead of via manual bug reports."""
+    return set(converted_text) & CP1252_HIGH_BYTES
+
+
 vowel_to_kar = {
     'আ': 'া', 'ই': 'ি', 'ঈ': 'ী', 'উ': 'ু', 'ঊ': 'ূ', 'ঋ': 'ৃ', 'এ': 'ে', 'ঐ': 'ৈ', 'ও': 'ো', 'ঔ': 'ৌ'
 }

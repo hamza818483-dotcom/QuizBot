@@ -1489,6 +1489,21 @@ def _convert_sutonny_spans(node):
             # so this is safe for every consonant, not just দ): source
             # "g~‡`ªi" -> "মূদে্রর" should read "...দ্রের" (ocean's).
             out = re.sub(r'([ক-হড়ঢ়য়])ে(্র)', r'\1\2ে', out)
+            # Safety net: flag any still-unmapped glyph that leaked through
+            # conversion instead of letting it silently reach the CSV. Logs
+            # the exact leaked char(s) + word so a NEW unmapped glyph
+            # surfaces in logs immediately instead of via a manual bug
+            # report weeks later (see bijoy_unicode/maps find_unmapped_glyphs).
+            try:
+                _leaked = _uc.find_unmapped_glyphs(out)
+                if _leaked:
+                    logger.warning(
+                        "atlas_mhtml: unmapped Bijoy glyph(s) %s leaked into "
+                        "output %r -- add to bijoy_unicode/maps/__init__.py",
+                        _leaked, out,
+                    )
+            except Exception:
+                pass
             return out
 
         if joined:
