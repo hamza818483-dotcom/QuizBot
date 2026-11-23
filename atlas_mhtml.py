@@ -1447,6 +1447,12 @@ def _convert_sutonny_spans(node):
             # before the conjunct that it belongs to.
             # ডি্র -> ড্রি (e.g. মাইটোকন্ডি্রয়া -> মাইটোকন্ড্রিয়া)
             out = re.sub(r'([ক-হড়ঢ়য়])ি(্[ক-হড়ঢ়য়])', r'\1\2ি', out)
+            # e-kar can also be stranded before a non-r conjunct
+            # (e.g. স্কে্লরেনকাইমা -> স্ক্লেরেনকাইমা). Bengali orthography
+            # places the vowel sign after the complete conjunct; this narrow
+            # consonant+ে+্+consonant pattern avoids touching normal
+            # consonant+্+consonant+ে sequences such as ক্রেতা.
+            out = re.sub(r'([ক-হড়ঢ়য়])ে(্[ক-হড়ঢ়য়])', r'\1\2ে', out)
             # তু্য -> ত্যু (u-kar stranded before ্য)
             out = re.sub(r'([ক-হড়ঢ়য়])([ুূ])(্য)', r'\1\3\2', out)
             # Specific legacy caret leak seen in "শ^েত": caret represents
