@@ -1482,18 +1482,21 @@ def _convert_sutonny_spans(node):
             #   - "¯øvBg" (ø immediately after ¯, confirmed this specific
             #     2-char combo leaks both chars as "¯্ল") -> স্লাইম/slime.
             out = out.replace("¬", "্ল").replace("¯্ল", "স্ল")
-            # Same leaked "¯" glyph, different already-correct surrounding
-            # conversion: "Awf¯ªeY" -> "অভ¯ি্রবণ" (prebase ি and ্র both
-            # already resolved correctly, only the literal ¯ in between
-            # leaks) -> অভিস্রবণ/osmosis.
-            out = out.replace("ভ¯ি্র", "ভিস্র")
+            # Same leaked "¯" glyph, general form (not word-locked): any
+            # consonant + leaked ¯ + prebase ি + conjunct, e.g.
+            # "Awf¯ªeY" -> "অভ¯ি্রবণ" (prebase ি and ্র already resolved
+            # correctly, only the literal ¯ in between leaks and the ি
+            # sits on the wrong side of it) -> অভিস্রবণ/osmosis. Applies to
+            # any base consonant + conjunct letter, not just ভ/র.
+            out = re.sub(r'([ক-হড়ঢ়য়])¯ি(্.)', r'\1িস\2', out)
             # Same prebase e-kar stranding bug as the প্রোটিন fix below, but
-            # for our own hardcoded "Ð"->ণ্ড conjunct specifically: source
-            # "Kv‡Ði" (কা + prebase-e-kar +ণ্ড + র) should read কাণ্ডের
-            # (card/stem's -- a normal postbase e-kar ending) but comes out
-            # as "কােণ্ডর" with the ে stranded BEFORE ণ্ড instead of after
-            # it. Move it.
-            out = out.replace("কােণ্ড", "কাণ্ডে")
+            # for our own hardcoded "Ð"->ণ্ড conjunct specifically, general
+            # form (not word-locked): consonant(+matra) + stray ে + ণ্ড
+            # should read consonant(+matra) + ণ্ড + ে. E.g. source "Kv‡Ði"
+            # (কা+prebase-e-kar+ণ্ড+র) should read কাণ্ডের (stem's -- a
+            # normal postbase e-kar ending) but comes out as "কােণ্ডর" with
+            # the ে stranded BEFORE ণ্ড instead of after it. Move it.
+            out = re.sub(r'([ক-হড়ঢ়য়](?:[া-ৌ])?)ে(ণ্ড)', r'\1\2ে', out)
             # The library also reorders a postbase ি matra across a
             # following দাঁড়ি (।), e.g. "ভিত্তি।" (noun+ি then দাঁড়ি) comes
             # out as "ভিত্ত।ি" with the ি stranded AFTER the দাঁড়ি instead
@@ -1516,11 +1519,14 @@ def _convert_sutonny_spans(node):
             # conjunct, forming ো), for every (possibly multi-conjunct)
             # cluster this pattern appears in.
             out = re.sub(r'ে((?:্.)+)া', r'\1ো', out)
-            # Same stranding bug, narrowly targeted for the one confirmed
-            # case with no trailing া to merge into ো (full general form
-            # over-fired on unrelated conjuncts and caused regressions):
+            # Same stranding bug, generalized for the ্র conjunct
+            # specifically (a fully general form across ALL conjuncts
+            # over-fired on unrelated cases and caused regressions -- the
+            # legitimate order consonant+্র+ে, as in ক্রেতা/customer, is
+            # unambiguously distinct from this bug's consonant+ে+্র order,
+            # so this is safe for every consonant, not just দ): source
             # "g~‡`ªi" -> "মূদে্রর" should read "...দ্রের" (ocean's).
-            out = out.replace("দে্র", "দ্রে")
+            out = re.sub(r'([ক-হড়ঢ়য়])ে(্র)', r'\1\2ে', out)
             return out
 
         if joined:
