@@ -1430,6 +1430,15 @@ def _convert_sutonny_spans(node):
         joined = "".join(raw_parts)
 
         def _bijoy_convert(t):
+            # Safe idempotence guard: if this fragment is already Unicode Bengali
+            # and contains no ASCII letters (the core Bijoy encoding alphabet),
+            # do not send it through the legacy converter again. This prevents
+            # Unicode text embedded in a SutonnyMJ-tagged span from being mangled
+            # by a second conversion. Mixed Unicode/Bijoy runs still use the
+            # normal converter, preserving legacy source handling.
+            if re.search(r'[\u0980-\u09FF]', t) and not re.search(r'[A-Za-z]', t):
+                return unicodedata.normalize('NFC', t)
+
             # All previously-missing SutonnyMJ glyphs (¤œ, ¯œ, æ, ƒ, Ð, ‚, ¬)
             # are now proper entries in our vendored bijoy_unicode map
             # (bijoy_unicode/maps/__init__.py) and go through the normal
