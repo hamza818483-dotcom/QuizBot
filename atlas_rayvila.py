@@ -291,9 +291,9 @@ async def scrape_rayvila_exam(url: str, candidate_name: str = "Student", progres
     parsing, done.
     """
     from playwright.async_api import async_playwright
-    from atlas_mhtml import results_to_csv_bytes
+    from atlas_mhtml import results_to_csv_bytes, results_to_xlsx_bytes
 
-    result = {"csv_bytes": None, "mcq_count": 0, "error": None}
+    result = {"csv_bytes": None, "xlsx_bytes": None, "mcq_count": 0, "error": None}
 
     async with async_playwright() as pw:
         # RAM was confirmed NOT the cause (production host logged 10+GB free
@@ -421,6 +421,7 @@ async def scrape_rayvila_exam(url: str, candidate_name: str = "Student", progres
         return result
 
     result["csv_bytes"] = results_to_csv_bytes(parsed_results)
+    result["xlsx_bytes"] = results_to_xlsx_bytes(parsed_results)
     result["mcq_count"] = len(parsed_results)
     _notify(progress_cb, "done")
     return result
