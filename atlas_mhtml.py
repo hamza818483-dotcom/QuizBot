@@ -630,6 +630,21 @@ def aggressive_clean(text):
     text = text.replace('° C', '°C').replace('^ C', '°C')
     text = re.sub(r'(\d)\s+°', r'\1°', text)
 
+    # Celsius normalization: source HTML/math markup may place the Celsius
+    # symbol BEFORE the number (e.g. "℃ 25 − 30 ℃"), split the symbol across
+    # inline nodes, or use the single-character ℃ (U+2103). Normalize ranges
+    # first so a leading °C is not mistaken for a standalone unit.
+    text = text.replace('℃', '°C')
+    text = re.sub(
+        r'°C\\s*(\\d+(?:\\.\\d+)?)\\s*[-−–—]\\s*(\\d+(?:\\.\\d+)?)\\s*°C',
+        r'\\1–\\2°C',
+        text,
+    )
+    # Symbol-before-value temperature: "°C 25" -> "25°C".
+    text = re.sub(r'°C\\s*(\\d+(?:\\.\\d+)?)', r'\\1°C', text)
+    # Value-before-symbol temperature: "25 ° C" / "25℃" -> "25°C".
+    text = re.sub(r'(\\d+(?:\\.\\d+)?)\\s*°\\s*C', r'\\1°C', text)
+
     text = text.translate(str.maketrans("ₐₑₒₓₕₖₗₘₙₚₛₜ", "aeoxhklmnpst"))
 
     text = re.sub(r'\s+([⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎]+)', r'\1', text)
