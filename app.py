@@ -611,9 +611,6 @@ async def _process_mhtml_auto(msg: dict):
         await send_document(chat_id, xlsx_bytes, f"ATLAS_{safe_title}.xlsx",
             caption="📊 একই প্রশ্নের Excel ফাইল",
             mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        await send_document(chat_id, xlsx_bytes, f"ATLAS_{safe_title}.xlsx",
-            caption="📊 একই প্রশ্নের Excel ফাইল",
-            mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         if loading_id:
             await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id})
@@ -16284,6 +16281,9 @@ async def handle_qcsv_command(msg: dict):
         await send_document(chat_id, csv_bytes, f"ATLAS_{safe_title}.csv",
             caption=f"📚 Source: {source}\n📝 মোট MCQ: {len(results)}\n🚀 ATLAS APP",
             mime_type="text/csv")
+        await send_document(chat_id, xlsx_bytes, f"ATLAS_{safe_title}.xlsx",
+            caption="📊 একই প্রশ্নের Excel ফাইল",
+            mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         if loading_id:
             await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id})
