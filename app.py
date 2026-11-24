@@ -311,7 +311,8 @@ async def _process_url_auto(msg: dict, url: str):
                             caption=f"✅ {result['mcq_count']}টা MCQ পাওয়া গেছে")
         if result.get("xlsx_bytes"):
             xlsx_name = re.sub(r"\.mhtml$", "", result["file_name"]) + ".xlsx"
-            await send_document(chat_id, result["xlsx_bytes"], xlsx_name,\n                                caption="📊 একই প্রশ্নের Excel ফাইল")
+            await send_document(chat_id, result["xlsx_bytes"], xlsx_name,
+                                caption="📊 একই প্রশ্নের Excel ফাইল")
     else:
         await send_msg(chat_id, "ℹ️ এই page-এ কোনো MCQ খুঁজে পাওয়া যায়নি (শুধু .mhtml পাঠানো হলো)।")
 
