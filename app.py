@@ -310,8 +310,8 @@ async def _process_url_auto(msg: dict, url: str):
         await send_document(chat_id, result["csv_bytes"], csv_name,
                             caption=f"✅ {result['mcq_count']}টা MCQ পাওয়া গেছে")
         if result.get("xlsx_bytes"):
-            xlsx_name = re.sub(r"\\.mhtml$", "", result["file_name"]) + ".xlsx"
-            await send_document(chat_id, result["xlsx_bytes"], xlsx_name,                                caption="📊 একই প্রশ্নের Excel ফাইল")
+            xlsx_name = re.sub(r"\.mhtml$", "", result["file_name"]) + ".xlsx"
+            await send_document(chat_id, result["xlsx_bytes"], xlsx_name,\n                                caption="📊 একই প্রশ্নের Excel ফাইল")
     else:
         await send_msg(chat_id, "ℹ️ এই page-এ কোনো MCQ খুঁজে পাওয়া যায়নি (শুধু .mhtml পাঠানো হলো)।")
 
@@ -608,9 +608,6 @@ async def _process_mhtml_auto(msg: dict):
         await send_document(chat_id, csv_bytes, f"ATLAS_{safe_title}.csv",
             caption=f"📚 Source: {source}\n📝 মোট MCQ: {len(results)}\n🚀 ATLAS APP",
             mime_type="text/csv")
-        await send_document(chat_id, xlsx_bytes, f"ATLAS_{safe_title}.xlsx",
-            caption="📊 একই প্রশ্নের Excel ফাইল",
-            mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         await send_document(chat_id, xlsx_bytes, f"ATLAS_{safe_title}.xlsx",
             caption="📊 একই প্রশ্নের Excel ফাইল",
             mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -16223,6 +16220,9 @@ async def handle_qcsv_auto(msg: dict):
         await send_document(chat_id, csv_bytes, f"ATLAS_{safe_title}.csv",
             caption=f"📚 Source: {source}\n📝 মোট MCQ: {len(results)}\n🚀 ATLAS APP",
             mime_type="text/csv")
+        await send_document(chat_id, xlsx_bytes, f"ATLAS_{safe_title}.xlsx",
+            caption="📊 একই প্রশ্নের Excel ফাইল",
+            mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         if loading_id:
             await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id})
