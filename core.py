@@ -3222,8 +3222,12 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str, footer_text: str
             c.save()
             packet.seek(0)
             overlay = PdfReader(packet)
-            page.merge_page(overlay.pages[0])
-            writer.add_page(page)
+            # 2026-11-25 FIX: pypdf 7.0.0 removed merge_page()/replace_contents()
+            # on a page still owned by `reader` -- the page must be attached to
+            # `writer` FIRST (add_page returns writer's own copy of the page),
+            # then merge the overlay onto that writer-owned copy.
+            written_page = writer.add_page(page)
+            written_page.merge_page(overlay.pages[0])
             # Free this page's overlay canvas/packet/reader before the next
             # page -- on a large multi-page PDF these otherwise pile up as
             # live references (each holds its own reportlab buffer +
@@ -3844,8 +3848,10 @@ def add_header_box_to_pdf(pdf_bytes: bytes, name_text: str) -> bytes:
             c.save()
             packet.seek(0)
             overlay = PdfReader(packet)
-            page.merge_page(overlay.pages[0])
-            writer.add_page(page)
+            # 2026-11-25 FIX: pypdf 7.0.0 removed merge_page()/replace_contents()
+            # on a page still owned by `reader` -- attach to `writer` first.
+            written_page = writer.add_page(page)
+            written_page.merge_page(overlay.pages[0])
             del packet, overlay, c  # free per-page overlay buffers before next page
 
         buf = _io.BytesIO()
@@ -3902,8 +3908,10 @@ def add_footer_box_to_pdf(pdf_bytes: bytes, footer_text: str) -> bytes:
             c.save()
             packet.seek(0)
             overlay = PdfReader(packet)
-            page.merge_page(overlay.pages[0])
-            writer.add_page(page)
+            # 2026-11-25 FIX: pypdf 7.0.0 removed merge_page()/replace_contents()
+            # on a page still owned by `reader` -- attach to `writer` first.
+            written_page = writer.add_page(page)
+            written_page.merge_page(overlay.pages[0])
             del packet, overlay, c  # free per-page overlay buffers before next page
 
         buf = _io.BytesIO()
