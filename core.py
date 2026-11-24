@@ -3192,7 +3192,16 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str, footer_text: str
             # Center diagonal watermark (bigger, scales a bit with page size)
             center_font_size = max(60, min(page_width, page_height) * 0.12)
             c.setFont("Helvetica-Bold", center_font_size)
-            c.setFillColor(Color(0, 0, 0, alpha=0.10))
+            # 2026-11-25 FIX: alpha-transparency (black @ 10% opacity) renders
+            # correctly in reportlab/pypdf itself, but several common PDF
+            # viewers (Google Docs viewer, CamScanner) don't composite PDF
+            # transparency groups correctly and show it as solid/dark
+            # instead of faint -- reported consistently across multiple
+            # users/viewers, not a one-off rendering quirk. Using a solid
+            # light-gray RGB color instead of alpha avoids transparency
+            # compositing entirely, so it renders identically light in
+            # every viewer regardless of how well it supports alpha.
+            c.setFillColorRGB(0.82, 0.82, 0.82)
             c.saveState()
             c.translate(page_width / 2, page_height / 2)
             c.rotate(45)
