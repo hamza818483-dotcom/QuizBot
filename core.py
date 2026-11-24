@@ -1633,7 +1633,17 @@ async def _get_pyro_client():
                 except Exception:
                     pass
             else:
-                logger.warning(f"[pyrogram] start() failed, will retry next call: {e}")
+                # Generic/transient failure (e.g. Telegram-side 500
+                # RPC_CALL_FAIL on auth.ImportBotAuthorization during an
+                # outage). Not a FLOOD_WAIT, but retrying start() on every
+                # single incoming call during an outage just hammers
+                # Telegram with more auth.ImportBotAuthorization calls and
+                # can itself trigger a real FLOOD_WAIT. Apply a short
+                # cooldown (much shorter than FLOOD_WAIT) so we back off
+                # and let Bot API getFile carry the load meanwhile, then
+                # retry on its own next time.
+                _pyro_flood_wait_until = time.time() + 30
+                logger.warning(f"[pyrogram] start() failed, backing off 30s before retrying (falls back to Bot API getFile meanwhile): {e}")
             return None
         _pyro_client = client
     return _pyro_client
