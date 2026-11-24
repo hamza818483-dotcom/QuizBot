@@ -649,12 +649,11 @@ def aggressive_clean(text):
 
     text = re.sub(r'\s+([⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎]+)', r'\1', text)
     text = text.replace('₍', '(').replace('₎', ')')
-    text = re.sub(r'(?<=[A-Za-z])\s+(?=[a-z](?:\s|$|[^a-zA-Z]))', '', text)
-    text = re.sub(r'(?<=\d)\s+(?=[A-Z])', '', text)
-    text = re.sub(r'(?<=[A-Z])\s+(?=[A-Z])', '', text)
-    text = re.sub(r'(?<=[A-Z])\s+(?=[a-z](?:\s|$|[^a-zA-Z]))', '', text)
-    text = re.sub(r'(?<=[A-Z][a-z])\s+(?=[A-Z])', '', text)
-    text = re.sub(r'(?<=[₀-₉⁰-⁹])\s+(?=[A-Z])', '', text)
+    # Do not globally remove spaces between Latin letters. The previous
+    # heuristics treated ordinary English boundaries as split math tokens:
+    # "A p-n" -> "Ap-n", "If a" -> "Ifa", "of a" -> "ofa", and "is r" -> "isr".
+    # Formula/unit-specific normalization below handles scientific notation
+    # without guessing that every single-letter word is part of a symbol.
     text = text.replace(' . ', '.').replace(' .', '.').replace('. ', '.')
 
     text = re.sub(r'\\[a-zA-Z]+\s*\{?', ' ', text)
