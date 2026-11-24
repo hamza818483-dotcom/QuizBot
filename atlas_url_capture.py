@@ -88,7 +88,7 @@ async def process_url_to_mhtml_and_csv(url: str, progress_cb=None) -> dict:
              "mcq_count": int, "error": str|None}
     progress_cb(stage: str) -- optional sync/async-ignored callback for status updates.
     """
-    from atlas_mhtml import parse_mhtml_to_mcqs, results_to_csv_bytes
+    from atlas_mhtml import parse_mhtml_to_mcqs, results_to_csv_bytes, results_to_xlsx_bytes
 
     def _notify(stage):
         if progress_cb:
@@ -105,7 +105,7 @@ async def process_url_to_mhtml_and_csv(url: str, progress_cb=None) -> dict:
 
     result = {
         "mhtml_bytes": mhtml_bytes, "file_name": file_name,
-        "csv_bytes": None, "mcq_count": 0, "error": None,
+        "csv_bytes": None, "xlsx_bytes": None, "mcq_count": 0, "error": None,
     }
 
     _notify("parsing")
@@ -114,6 +114,7 @@ async def process_url_to_mhtml_and_csv(url: str, progress_cb=None) -> dict:
         results = parsed.get("results") or []
         if results:
             result["csv_bytes"] = results_to_csv_bytes(results)
+            result["xlsx_bytes"] = results_to_xlsx_bytes(results)
             result["mcq_count"] = len(results)
     except Exception as e:
         logger.warning(f"[url-capture] parse/csv failed for {url}: {e}")
