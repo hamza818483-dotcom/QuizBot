@@ -2259,3 +2259,51 @@ def results_to_csv_bytes(results: list) -> bytes:
     for row in results:
         writer.writerow(row)
     return csv_buf.getvalue().encode("utf-8-sig")
+
+
+def results_to_xlsx_bytes(results: list) -> bytes:
+    """Create an XLSX with the exact same headers and row data as CSV export."""
+    if not results:
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Questions"
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    # Match results_to_csv_bytes() exactly: union of keys in first-seen order.
+    fieldnames = []
+    for row in results:
+        for key in row.keys():
+            if key not in fieldnames:
+                fieldnames.append(key)
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Questions"
+    ws.append(fieldnames)
+    for row in results:
+        ws.append([row.get(key, "") for key in fieldnames])
+
+    # Readable header; column names/order and data remain unchanged.
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill(fill_type="solid", fgColor="4472C4")
+        cell.alignment = Alignment(vertical="top", wrap_text=True)
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    for col_idx, key in enumerate(fieldnames, 1):
+        max_len = min(max(len(str(key)), *(len(str(row.get(key, "") or "")) for row in results)), 60)
+        ws.column_dimensions[get_column_letter(col_idx)].width = max(12, min(max_len + 2, 60))
+    for row in ws.iter_rows(min_row=2):
+        for cell in row:
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
