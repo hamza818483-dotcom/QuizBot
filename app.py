@@ -158,7 +158,7 @@ from chorcha_pdf import build_chorcha_pdf_html
 
 # ATLAS full mhtml/html → CSV converter (Chorcha.net + Testmoz, LaTeX cleanup, imgbb images)
 # Ported 100% from AtlasMasterBot's mhtml_handler.py
-from atlas_mhtml import parse_mhtml_to_mcqs, results_to_csv_bytes
+from atlas_mhtml import parse_mhtml_to_mcqs, results_to_csv_bytes, results_to_xlsx_bytes
 # Generic "send a link → auto .mhtml + auto CSV" feature (any public URL,
 # no chorcha.net login needed — see atlas_url_capture.py)
 from atlas_url_capture import is_plain_url, process_url_to_mhtml_and_csv
@@ -309,6 +309,9 @@ async def _process_url_auto(msg: dict, url: str):
         csv_name = re.sub(r"\.mhtml$", "", result["file_name"]) + ".csv"
         await send_document(chat_id, result["csv_bytes"], csv_name,
                             caption=f"✅ {result['mcq_count']}টা MCQ পাওয়া গেছে")
+        if result.get("xlsx_bytes"):
+            xlsx_name = re.sub(r"\\.mhtml$", "", result["file_name"]) + ".xlsx"
+            await send_document(chat_id, result["xlsx_bytes"], xlsx_name,                                caption="📊 একই প্রশ্নের Excel ফাইল")
     else:
         await send_msg(chat_id, "ℹ️ এই page-এ কোনো MCQ খুঁজে পাওয়া যায়নি (শুধু .mhtml পাঠানো হলো)।")
 
@@ -470,8 +473,10 @@ async def _process_rayvila_auto(msg: dict, url: str):
                                parse_mode="HTML")
             except Exception:
                 pass
-        await send_document(chat_id, result["csv_bytes"], csv_name,
-                            caption=f"✅ {result['mcq_count']}টা MCQ পাওয়া গেছে (Rayvila)")
+        await send_document(chat_id, result["csv_bytes"], csv_name,                            caption=f"✅ {result['mcq_count']}টা MCQ পাওয়া গেছে (Rayvila)")
+        if result.get("xlsx_bytes"):
+            await send_document(chat_id, result["xlsx_bytes"], csv_name[:-4] + ".xlsx",
+                                caption="📊 একই প্রশ্নের Excel ফাইল (Rayvila)")
         if loading_id:
             _spawn_task(tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id}))
 
@@ -588,6 +593,7 @@ async def _process_mhtml_auto(msg: dict):
             job["total"] = max(job["total"], len(results))
 
         csv_bytes = await asyncio.to_thread(results_to_csv_bytes, results)
+        xlsx_bytes = await asyncio.to_thread(results_to_xlsx_bytes, results)
 
         if job:
             job["phase"] = "sending"
@@ -602,6 +608,12 @@ async def _process_mhtml_auto(msg: dict):
         await send_document(chat_id, csv_bytes, f"ATLAS_{safe_title}.csv",
             caption=f"📚 Source: {source}\n📝 মোট MCQ: {len(results)}\n🚀 ATLAS APP",
             mime_type="text/csv")
+        await send_document(chat_id, xlsx_bytes, f"ATLAS_{safe_title}.xlsx",
+            caption="📊 একই প্রশ্নের Excel ফাইল",
+            mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        await send_document(chat_id, xlsx_bytes, f"ATLAS_{safe_title}.xlsx",
+            caption="📊 একই প্রশ্নের Excel ফাইল",
+            mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         if loading_id:
             await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id})
@@ -2483,6 +2495,7 @@ async def url_to_csv(request: Request):
         return JSONResponse({"ok": False, "error": "কোনো প্রশ্ন খুঁজে পাওয়া যায়নি।"}, status_code=400)
 
     csv_bytes = result["csv_bytes"]
+    xlsx_bytes = result.get("xlsx_bytes")
     file_stem = (
         re.sub(r"[^a-zA-Z0-9]+", "_", url.split("//", 1)[-1]).strip("_")[:60] or "rayvila_exam"
         if is_rayvila
@@ -2492,7 +2505,9 @@ async def url_to_csv(request: Request):
         "ok": True,
         "count": result["mcq_count"],
         "csv_base64": base64.b64encode(csv_bytes).decode("ascii"),
+        "xlsx_base64": base64.b64encode(xlsx_bytes).decode("ascii") if xlsx_bytes else None,
         "file_name": file_stem + ".csv",
+        "xlsx_file_name": file_stem + ".xlsx",
     })
 
 
