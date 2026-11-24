@@ -15069,15 +15069,47 @@ async def handle_combo_wm_h_f_command(msg: dict, combo: dict):
             out_name = orig_filename or "stamped.pdf"
         if not out_name.lower().endswith(".pdf"):
             out_name += ".pdf"
-        send_res = await send_document(chat_id, pdf_bytes,
-            out_name,
-            caption="✅ Applied — " + ", ".join(parts_desc),
-            mime_type="application/pdf"
-        )
-        if not send_res.get("ok"):
-            err = send_res.get("error") or send_res.get("description") or "unknown error"
-            logger.error(f"[ComboWMHF] send_document failed: {err}")
-            await send_msg(chat_id, f"❌ পাঠাতে ব্যর্থ: {err}")
+        caption = "✅ Applied — " + ", ".join(parts_desc)
+
+        # 2026-11-24: same >50MB bot-upload-cap workaround as /cut --
+        # route through RELAY_GROUP_CHAT_ID (bot+userbot both members
+        # there) then forwardMessage into the requester's own chat,
+        # instead of failing outright on a direct DM send_document.
+        out_size = len(pdf_bytes)
+        TG_BOT_UPLOAD_LIMIT = 50 * 1024 * 1024  # 50MB
+        if out_size > TG_BOT_UPLOAD_LIMIT and RELAY_GROUP_CHAT_ID and chat_id != RELAY_GROUP_CHAT_ID:
+            relay_res = await send_document(RELAY_GROUP_CHAT_ID, pdf_bytes, out_name, caption=caption,
+                                             mime_type="application/pdf")
+            if not relay_res.get("ok"):
+                err = relay_res.get("error") or relay_res.get("description") or "unknown error"
+                logger.error(f"[ComboWMHF] relay group send_document failed: {err}")
+                await send_msg(chat_id, f"❌ Relay group এ পাঠাতে ব্যর্থ: {err}")
+                return
+            relay_msg_id = relay_res.get("result", {}).get("message_id")
+            fwd_res = await tg_post("forwardMessage", {
+                "chat_id": chat_id,
+                "from_chat_id": RELAY_GROUP_CHAT_ID,
+                "message_id": relay_msg_id,
+            })
+            if not fwd_res.get("ok"):
+                err = fwd_res.get("error") or fwd_res.get("description") or "unknown error"
+                logger.error(f"[ComboWMHF] forwardMessage to DM failed: {err}")
+                await send_msg(chat_id, f"❌ DM এ forward করতে ব্যর্থ: {err}\n(Group এ ফাইলটা আছে)")
+                return
+        elif out_size > TG_BOT_UPLOAD_LIMIT and not RELAY_GROUP_CHAT_ID:
+            logger.error("[ComboWMHF] output >50MB but RELAY_GROUP_CHAT_ID/CHAT_ID env var not set")
+            await send_msg(chat_id, "❌ ফাইল 50MB+ কিন্তু relay group configure করা নেই (CHAT_ID env var)।")
+            return
+        else:
+            send_res = await send_document(chat_id, pdf_bytes,
+                out_name,
+                caption=caption,
+                mime_type="application/pdf"
+            )
+            if not send_res.get("ok"):
+                err = send_res.get("error") or send_res.get("description") or "unknown error"
+                logger.error(f"[ComboWMHF] send_document failed: {err}")
+                await send_msg(chat_id, f"❌ পাঠাতে ব্যর্থ: {err}")
     except Exception as e:
         await send_msg(chat_id, f"❌ Combo error: {e}")
 
