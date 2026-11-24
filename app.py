@@ -15103,7 +15103,51 @@ async def handle_combo_wm_h_f_command(msg: dict, combo: dict):
                     except Exception:
                         pass
             else:
-                logger.warning("[ComboWMHF] disk download failed/unavailable, falling back to Bot API")
+                logger.warning("[ComboWMHF] disk download failed/unavailable")
+                # 2026-11-24: file is >45MB (use_disk only set above that),
+                # so Bot API getFile WILL fail outright (50MB hard cap) --
+                # falling through to it here just produces the misleading
+                # "❌ Combo error: getFile failed: file is too big" even
+                # though the real, fixable cause was a transient pyrogram
+                # outage (e.g. Telegram-side 500 RPC_CALL_FAIL briefly
+                # tripping the 30s start() backoff in _get_pyro_client).
+                # Wait out that short backoff (capped, so we never hang
+                # indefinitely on a real/longer FLOOD_WAIT) and retry
+                # pyrogram once before giving up for real.
+                try:
+                    from core import _pyro_flood_wait_until as _pfw
+                except Exception:
+                    _pfw = 0.0
+                _remaining = max(0.0, _pfw - time.time())
+                if _remaining and _remaining <= 45:
+                    await _set_step(0, None, int(_remaining) + 2)
+                    await asyncio.sleep(_remaining + 2)
+                    try:
+                        result_path = await download_large_file_to_disk(
+                            chat_id, reply["message_id"], disk_src_path, progress_cb=_dl_progress)
+                    except _DownloadCancelled:
+                        if status_msg_id:
+                            await _dl_cancel_cleanup(chat_id, status_msg_id)
+                        try:
+                            os.remove(disk_src_path)
+                        except Exception:
+                            pass
+                        return
+                    if result_path:
+                        try:
+                            with open(result_path, "rb") as _f:
+                                pdf_bytes = _f.read()
+                        finally:
+                            try:
+                                os.remove(result_path)
+                            except Exception:
+                                pass
+                if pdf_bytes is None:
+                    if status_msg_id:
+                        await edit_msg(chat_id, status_msg_id,
+                            "❌ ফাইল 50MB+ এবং বড় ফাইল ডাউনলোডের জন্য দরকারি সংযোগ (userbot) "
+                            "সাময়িকভাবে অনুপলব্ধ (Telegram সাইডের সমস্যা)। একটু পরে আবার চেষ্টা করো।")
+                    return
         if pdf_bytes is None:
             try:
                 pdf_bytes = await download_tg_file(file_id, progress_cb=_dl_progress,
