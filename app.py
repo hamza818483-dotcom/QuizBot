@@ -489,8 +489,12 @@ async def _process_mhtml_auto(msg: dict):
     doc = msg["document"]
     file_name = doc.get("file_name", "")
 
-    loading = await send_msg(chat_id, "🔍 File বিশ্লেষণ করা হচ্ছে...")
-    loading_id = loading.get("result", {}).get("message_id")
+    loading_id = msg.get("_mhtml_loading_id")
+    if loading_id:
+        await edit_msg(chat_id, loading_id, "🔍 File বিশ্লেষণ করা হচ্ছে...")
+    else:
+        loading = await send_msg(chat_id, "🔍 File বিশ্লেষণ করা হচ্ছে...")
+        loading_id = loading.get("result", {}).get("message_id")
 
     job_id = gen_session_id()
     MHTML_JOBS[job_id] = {
@@ -40517,7 +40521,12 @@ async def handle_message(msg: dict):
             except Exception:
                 pass
         if _is_html_like:
-            await send_msg(chat_id, "✅ File পেয়েছি, প্রসেস শুরু হচ্ছে...")
+            # Single-message flow: this instant ack becomes THE loading
+            # message that gets edited through every phase (download ->
+            # detect -> parse -> csv -> send), instead of sending a second,
+            # separate "File বিশ্লেষণ করা হচ্ছে..." message right after it.
+            _ack = await send_msg(chat_id, "✅ File পেয়েছি, প্রসেস শুরু হচ্ছে...")
+            msg["_mhtml_loading_id"] = _ack.get("result", {}).get("message_id")
             await _mhtml_auto_queue.put(msg)
             qsize = _mhtml_auto_queue.qsize()
             if qsize > 1:
