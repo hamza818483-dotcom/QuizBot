@@ -636,14 +636,14 @@ def aggressive_clean(text):
     # first so a leading °C is not mistaken for a standalone unit.
     text = text.replace('℃', '°C')
     text = re.sub(
-        r'°C\\s*(\\d+(?:\\.\\d+)?)\\s*[-−–—]\\s*(\\d+(?:\\.\\d+)?)\\s*°C',
-        r'\\1–\\2°C',
+        r'°C\s*(\d+(?:\.\d+)?)\s*[-−–—]\s*(\d+(?:\.\d+)?)\s*°C',
+        r'\1–\2°C',
         text,
     )
     # Symbol-before-value temperature: "°C 25" -> "25°C".
-    text = re.sub(r'°C\\s*(\\d+(?:\\.\\d+)?)', r'\\1°C', text)
+    text = re.sub(r'°C\s*(\d+(?:\.\d+)?)', r'\1°C', text)
     # Value-before-symbol temperature: "25 ° C" / "25℃" -> "25°C".
-    text = re.sub(r'(\\d+(?:\\.\\d+)?)\\s*°\\s*C', r'\\1°C', text)
+    text = re.sub(r'(\d+(?:\.\d+)?)\s*°\s*C', r'\1°C', text)
 
     text = text.translate(str.maketrans("ₐₑₒₓₕₖₗₘₙₚₛₜ", "aeoxhklmnpst"))
 
