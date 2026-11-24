@@ -12848,11 +12848,55 @@ async def _handle_cut_pdf_command_inner(msg: dict):
                 result_path = await download_large_file_to_disk(
                     chat_id, reply["message_id"], disk_src_path, progress_cb=_progress)
                 if not result_path:
+                    # 2026-11-24: a failed disk download here is usually a
+                    # transient pyrogram/Telegram-side outage (500
+                    # RPC_CALL_FAIL on auth.ImportBotAuthorization tripping
+                    # _get_pyro_client's short backoff), not a permanent
+                    # unavailability. Falling straight to the in-memory
+                    # Bot-API path below only works for files <=50MB --
+                    # above that it just fails outright with a misleading
+                    # "file is too big". Retry pyrogram itself up to 3x
+                    # first (same bounded wait-and-retry Combo uses) before
+                    # falling back, so a short outage self-heals instead of
+                    # failing the whole command.
+                    logger.warning("[Cut] disk download failed/unavailable, retrying before falling back")
+                    _MAX_RETRIES = 3
+                    _MAX_SINGLE_WAIT = 45
+                    _MAX_TOTAL_WAIT = 150
+                    _total_waited = 0.0
+                    for _attempt in range(1, _MAX_RETRIES + 1):
+                        try:
+                            from core import _pyro_flood_wait_until as _pfw
+                        except Exception:
+                            _pfw = 0.0
+                        _remaining = max(0.0, _pfw - time.time())
+                        _wait = min(_remaining + 2, _MAX_SINGLE_WAIT) if _remaining else 5.0
+                        if _total_waited + _wait > _MAX_TOTAL_WAIT:
+                            break
+                        _total_waited += _wait
+                        if status_msg_id:
+                            try:
+                                await edit_msg(chat_id, status_msg_id,
+                                    f"⏳ Userbot সাময়িক সমস্যায় — {int(_wait)}s পর আবার চেষ্টা হবে...\n"
+                                    f"📄 {file_name}\n🎯 Target: {target_label}",
+                                    reply_markup=_dlcancel_kb(chat_id, status_msg_id))
+                            except Exception:
+                                pass
+                        await asyncio.sleep(_wait)
+                        result_path = await download_large_file_to_disk(
+                            chat_id, reply["message_id"], disk_src_path, progress_cb=_progress)
+                        if result_path:
+                            break
+                        logger.warning(f"[Cut] retry {_attempt}/{_MAX_RETRIES} failed")
+                if not result_path:
                     # Disk path needs pyrogram + original chat/message context;
                     # fall back to the in-memory path if it's unavailable so
                     # large files still work (just with more RAM pressure)
-                    # rather than failing outright.
-                    logger.warning("[Cut] disk download failed/unavailable, falling back to in-memory download")
+                    # rather than failing outright. (If file_size > 50MB this
+                    # will still fail honestly via download_tg_file's own
+                    # getFile error -- that's a real Bot API hard limit, not
+                    # something a retry here can fix.)
+                    logger.warning("[Cut] disk download still unavailable after retries, falling back to in-memory download")
                     pdf_bytes = await download_tg_file(file_id, progress_cb=_progress,
                                                         chat_id=chat_id, message_id=reply["message_id"])
                     disk_src_path = None
