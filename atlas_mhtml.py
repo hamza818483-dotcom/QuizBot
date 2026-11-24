@@ -1618,10 +1618,15 @@ def _convert_sutonny_spans(node):
 
 
 def _parse_zoro_realm(soup, progress_cb=None):
+    # A/B/C/D option badges: older (Bangla) pages render them as
+    # <span class="rounded-full border-2">, newer (English, e.g.
+    # medical-2025-en live-exam) pages render the same badge as a
+    # <button class="rounded-full border-2">. Both must be recognized --
+    # this is the same visual layout, just a different tag.
     cards = [
         c for c in soup.select('div.text-card-foreground')
         if c.select_one('div.mathjax-content')
-        and c.select('span.rounded-full.border-2')  # A/B/C/D badges -> real question card
+        and c.select('span.rounded-full.border-2, button.rounded-full.border-2')
     ]
     if not cards:
         return None
@@ -1646,7 +1651,7 @@ def _parse_zoro_realm(soup, progress_cb=None):
                 skipped.append((ci, "question text empty"))
                 continue
 
-            opt_rows = card.select('span.rounded-full.border-2')
+            opt_rows = card.select('span.rounded-full.border-2, button.rounded-full.border-2')
             options, ans_idx = [], ""
             for i, badge in enumerate(opt_rows, 1):
                 row = badge.find_parent('div', class_='flex')
