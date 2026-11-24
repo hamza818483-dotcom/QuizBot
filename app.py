@@ -15005,7 +15005,51 @@ async def handle_combo_wm_h_f_command(msg: dict, combo: dict):
         parts_desc.append(f"header: <b>{combo['h']}</b>")
     if "f" in combo:
         parts_desc.append(f"footer: <b>{combo['f']}</b>")
-    await send_msg(chat_id, "⏳ বসছে — " + ", ".join(parts_desc), parse_mode="HTML")
+    desc_line = ", ".join(parts_desc)
+
+    # 2026-11-24: single editable status message (like /cut) instead of a
+    # fire-and-forget "বসছে" message + silent processing -- shows elapsed
+    # time, current step label, a %-bar where the step has real progress
+    # (download), an ETA guess, and a Cancel button, all via edit_msg on
+    # one message_id so the chat doesn't fill up with separate updates.
+    _t_start = time.time()
+    _steps = (["download"] + (["watermark"] if "wm" in combo else [])
+              + (["header"] if "h" in combo else []) + (["footer"] if "f" in combo else [])
+              + ["upload"])
+    _step_labels = {
+        "download": "📥 ডাউনলোড হচ্ছে", "watermark": "🖊️ Watermark বসছে",
+        "header": "📑 Header বসছে", "footer": "📑 Footer বসছে", "upload": "📤 পাঠানো হচ্ছে",
+    }
+    _n_steps = len(_steps)
+
+    def _elapsed() -> str:
+        s = int(time.time() - _t_start)
+        return f"{s//60}:{s%60:02d}" if s >= 60 else f"{s}s"
+
+    def _status_text(step_idx: int, pct: int = None, eta_s: int = None) -> str:
+        step = _steps[step_idx]
+        lines = [f"⏳ Combo — {desc_line}", f"ধাপ: {_step_labels[step]} ({step_idx+1}/{_n_steps})"]
+        if pct is not None:
+            lines.append(f"[{_dlbar(pct)} {pct}%]")
+        lines.append(f"⏱️ সময় গেছে: {_elapsed()}" + (f" · আনুমানিক বাকি: ~{eta_s}s" if eta_s else ""))
+        return "\n".join(lines)
+
+    status_r = await send_msg(chat_id, _status_text(0))
+    status_msg_id = status_r.get("result", {}).get("message_id")
+    if status_msg_id:
+        try:
+            await edit_msg(chat_id, status_msg_id, _status_text(0),
+                            reply_markup=_dlcancel_kb(chat_id, status_msg_id))
+        except Exception:
+            pass
+
+    async def _set_step(i, pct=None, eta_s=None):
+        if status_msg_id:
+            try:
+                await edit_msg(chat_id, status_msg_id, _status_text(i, pct, eta_s),
+                                reply_markup=_dlcancel_kb(chat_id, status_msg_id))
+            except Exception:
+                pass
 
     try:
         import gc as _gc
@@ -15019,10 +15063,36 @@ async def handle_combo_wm_h_f_command(msg: dict, combo: dict):
         COMBO_DISK_THRESHOLD = 45 * 1024 * 1024  # ~45MB
         use_disk = file_size and file_size > COMBO_DISK_THRESHOLD
         pdf_bytes = None
+
+        _last_pct = {"v": -1}
+        _dl_start = time.time()
+
+        async def _dl_progress_inner(done, total):
+            if not total:
+                return
+            pct = int(done * 100 / total)
+            if pct == _last_pct["v"] or (pct - _last_pct["v"] < 5 and pct != 100):
+                return
+            _last_pct["v"] = pct
+            elapsed = time.time() - _dl_start
+            eta = int(elapsed * (100 - pct) / pct) if pct > 0 else None
+            await _set_step(0, pct, eta)
+
+        _dl_progress = _wrap_dl_progress_cb(chat_id, status_msg_id, _dl_progress_inner) if status_msg_id else _dl_progress_inner
+
         if use_disk:
             disk_src_path = f"/tmp/combosrc_{chat_id}_{int(time.time()*1000)}.pdf"
-            result_path = await download_large_file_to_disk(
-                chat_id, reply["message_id"], disk_src_path)
+            try:
+                result_path = await download_large_file_to_disk(
+                    chat_id, reply["message_id"], disk_src_path, progress_cb=_dl_progress)
+            except _DownloadCancelled:
+                if status_msg_id:
+                    await _dl_cancel_cleanup(chat_id, status_msg_id)
+                try:
+                    os.remove(disk_src_path)
+                except Exception:
+                    pass
+                return
             if result_path:
                 try:
                     with open(result_path, "rb") as _f:
@@ -15035,7 +15105,15 @@ async def handle_combo_wm_h_f_command(msg: dict, combo: dict):
             else:
                 logger.warning("[ComboWMHF] disk download failed/unavailable, falling back to Bot API")
         if pdf_bytes is None:
-            pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=reply["message_id"])
+            try:
+                pdf_bytes = await download_tg_file(file_id, progress_cb=_dl_progress,
+                                                    chat_id=chat_id, message_id=reply["message_id"])
+            except _DownloadCancelled:
+                if status_msg_id:
+                    await _dl_cancel_cleanup(chat_id, status_msg_id)
+                return
+
+        step_i = 1
         # 2026-10-29: each add_*_to_pdf() call below fully rebuilds the PDF
         # (PdfReader + PdfWriter + a per-page reportlab overlay canvas +
         # a brand-new output buffer) and the old pdf_bytes isn't freed
@@ -15045,6 +15123,7 @@ async def handle_combo_wm_h_f_command(msg: dict, combo: dict):
         # past 512MB on Render free. Explicit gc.collect() between steps
         # forces each stale copy to actually free before the next rebuild.
         if "wm" in combo:
+            await _set_step(step_i)
             _prev = pdf_bytes
             pdf_bytes = add_watermark_to_pdf(
                 pdf_bytes, combo["wm"],
@@ -15052,16 +15131,23 @@ async def handle_combo_wm_h_f_command(msg: dict, combo: dict):
             )
             del _prev
             _gc.collect()
+            step_i += 1
         if "h" in combo:
+            await _set_step(step_i)
             _prev = pdf_bytes
             pdf_bytes = add_header_box_to_pdf(pdf_bytes, combo["h"])
             del _prev
             _gc.collect()
+            step_i += 1
         if "f" in combo:
+            await _set_step(step_i)
             _prev = pdf_bytes
             pdf_bytes = add_footer_box_to_pdf(pdf_bytes, combo["f"])
             del _prev
             _gc.collect()
+            step_i += 1
+
+        await _set_step(step_i)  # "upload" step
 
         if "rename" in combo:
             out_name = re.sub(r'[\\/:*?"<>|]', '_', combo["rename"].strip())
@@ -15069,7 +15155,7 @@ async def handle_combo_wm_h_f_command(msg: dict, combo: dict):
             out_name = orig_filename or "stamped.pdf"
         if not out_name.lower().endswith(".pdf"):
             out_name += ".pdf"
-        caption = "✅ Applied — " + ", ".join(parts_desc)
+        caption = "✅ Applied — " + desc_line
 
         # 2026-11-24: same >50MB bot-upload-cap workaround as /cut --
         # route through RELAY_GROUP_CHAT_ID (bot+userbot both members
@@ -15083,7 +15169,8 @@ async def handle_combo_wm_h_f_command(msg: dict, combo: dict):
             if not relay_res.get("ok"):
                 err = relay_res.get("error") or relay_res.get("description") or "unknown error"
                 logger.error(f"[ComboWMHF] relay group send_document failed: {err}")
-                await send_msg(chat_id, f"❌ Relay group এ পাঠাতে ব্যর্থ: {err}")
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id, f"❌ Relay group এ পাঠাতে ব্যর্থ: {err}")
                 return
             relay_msg_id = relay_res.get("result", {}).get("message_id")
             fwd_res = await tg_post("forwardMessage", {
@@ -15094,11 +15181,16 @@ async def handle_combo_wm_h_f_command(msg: dict, combo: dict):
             if not fwd_res.get("ok"):
                 err = fwd_res.get("error") or fwd_res.get("description") or "unknown error"
                 logger.error(f"[ComboWMHF] forwardMessage to DM failed: {err}")
-                await send_msg(chat_id, f"❌ DM এ forward করতে ব্যর্থ: {err}\n(Group এ ফাইলটা আছে)")
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id, f"❌ DM এ forward করতে ব্যর্থ: {err}\n(Group এ ফাইলটা আছে)")
                 return
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id,
+                    f"✅ সম্পন্ন! ({_elapsed()}, 50MB+ হওয়ায় relay group হয়ে পাঠানো হয়েছে)")
         elif out_size > TG_BOT_UPLOAD_LIMIT and not RELAY_GROUP_CHAT_ID:
             logger.error("[ComboWMHF] output >50MB but RELAY_GROUP_CHAT_ID/CHAT_ID env var not set")
-            await send_msg(chat_id, "❌ ফাইল 50MB+ কিন্তু relay group configure করা নেই (CHAT_ID env var)।")
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ ফাইল 50MB+ কিন্তু relay group configure করা নেই (CHAT_ID env var)।")
             return
         else:
             send_res = await send_document(chat_id, pdf_bytes,
@@ -15109,9 +15201,16 @@ async def handle_combo_wm_h_f_command(msg: dict, combo: dict):
             if not send_res.get("ok"):
                 err = send_res.get("error") or send_res.get("description") or "unknown error"
                 logger.error(f"[ComboWMHF] send_document failed: {err}")
-                await send_msg(chat_id, f"❌ পাঠাতে ব্যর্থ: {err}")
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id, f"❌ পাঠাতে ব্যর্থ: {err}")
+                return
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, f"✅ সম্পন্ন! ({_elapsed()})")
     except Exception as e:
-        await send_msg(chat_id, f"❌ Combo error: {e}")
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"❌ Combo error: {e}")
+        else:
+            await send_msg(chat_id, f"❌ Combo error: {e}")
 
 
 # 2026-11-02: owner-only RAM profiling command. tracemalloc traces every
