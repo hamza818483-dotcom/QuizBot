@@ -15009,7 +15009,33 @@ async def handle_combo_wm_h_f_command(msg: dict, combo: dict):
 
     try:
         import gc as _gc
-        pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=reply["message_id"])
+        # 2026-11-24: Bot API's getFile caps at 50MB (BadRequest: file is
+        # too big) -- same limit /cut already works around by streaming
+        # via pyrogram straight to disk for files over this threshold,
+        # then reading the bytes back in. Mirrors handle_cut_pdf_command's
+        # DISK_PATH_THRESHOLD/use_disk logic so Combo (/rename+/wm+/h+/f)
+        # works on files Bot API alone can't fetch.
+        file_size = reply["document"].get("file_size", 0)
+        COMBO_DISK_THRESHOLD = 45 * 1024 * 1024  # ~45MB
+        use_disk = file_size and file_size > COMBO_DISK_THRESHOLD
+        pdf_bytes = None
+        if use_disk:
+            disk_src_path = f"/tmp/combosrc_{chat_id}_{int(time.time()*1000)}.pdf"
+            result_path = await download_large_file_to_disk(
+                chat_id, reply["message_id"], disk_src_path)
+            if result_path:
+                try:
+                    with open(result_path, "rb") as _f:
+                        pdf_bytes = _f.read()
+                finally:
+                    try:
+                        os.remove(result_path)
+                    except Exception:
+                        pass
+            else:
+                logger.warning("[ComboWMHF] disk download failed/unavailable, falling back to Bot API")
+        if pdf_bytes is None:
+            pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=reply["message_id"])
         # 2026-10-29: each add_*_to_pdf() call below fully rebuilds the PDF
         # (PdfReader + PdfWriter + a per-page reportlab overlay canvas +
         # a brand-new output buffer) and the old pdf_bytes isn't freed
