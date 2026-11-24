@@ -2452,11 +2452,13 @@ async def mhtml_to_csv(file: UploadFile = File(...), secret: str = Form("")):
         return JSONResponse({"ok": False, "error": "কোনো প্রশ্ন খুঁজে পাওয়া যায়নি।"}, status_code=400)
 
     csv_bytes = results_to_csv_bytes(results)
+    xlsx_bytes = results_to_xlsx_bytes(results)
     return JSONResponse({
         "ok": True,
         "source": parsed.get("source"),
         "count": len(results),
         "csv_base64": base64.b64encode(csv_bytes).decode("ascii"),
+        "xlsx_base64": base64.b64encode(xlsx_bytes).decode("ascii"),
         "file_name": re.sub(r"\.(mhtml|mht|html|htm)$", "", file_name, flags=re.I) + ".csv",
     })
 
@@ -16218,6 +16220,7 @@ async def handle_qcsv_auto(msg: dict):
                 f"✅ {len(results)} টি MCQ পাওয়া গেছে! ({source})\n📄 CSV বানানো হচ্ছে...")
 
         csv_bytes = await asyncio.to_thread(results_to_csv_bytes, results)
+        xlsx_bytes = await asyncio.to_thread(results_to_xlsx_bytes, results)
 
         safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", file_name.rsplit(".", 1)[0])[:50] or "ATLAS_QuestionBank"
         await send_document(chat_id, csv_bytes, f"ATLAS_{safe_title}.csv",
@@ -16275,6 +16278,7 @@ async def handle_qcsv_command(msg: dict):
                 f"✅ {len(results)} টি MCQ পাওয়া গেছে! ({source})\n📄 CSV বানানো হচ্ছে...")
 
         csv_bytes = await asyncio.to_thread(results_to_csv_bytes, results)
+        xlsx_bytes = await asyncio.to_thread(results_to_xlsx_bytes, results)
 
         safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", file_name.rsplit(".", 1)[0])[:50] or "ATLAS_QuestionBank"
         await send_document(chat_id, csv_bytes, f"ATLAS_{safe_title}.csv",
