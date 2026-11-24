@@ -15108,20 +15108,32 @@ async def handle_combo_wm_h_f_command(msg: dict, combo: dict):
                 # so Bot API getFile WILL fail outright (50MB hard cap) --
                 # falling through to it here just produces the misleading
                 # "❌ Combo error: getFile failed: file is too big" even
-                # though the real, fixable cause was a transient pyrogram
-                # outage (e.g. Telegram-side 500 RPC_CALL_FAIL briefly
-                # tripping the 30s start() backoff in _get_pyro_client).
-                # Wait out that short backoff (capped, so we never hang
-                # indefinitely on a real/longer FLOOD_WAIT) and retry
-                # pyrogram once before giving up for real.
-                try:
-                    from core import _pyro_flood_wait_until as _pfw
-                except Exception:
-                    _pfw = 0.0
-                _remaining = max(0.0, _pfw - time.time())
-                if _remaining and _remaining <= 45:
-                    await _set_step(0, None, int(_remaining) + 2)
-                    await asyncio.sleep(_remaining + 2)
+                # though the real, fixable cause is usually a transient
+                # pyrogram/Telegram-side outage (500 RPC_CALL_FAIL on
+                # auth.ImportBotAuthorization briefly tripping the 30s
+                # start() backoff in _get_pyro_client). A single retry
+                # wasn't always enough if Telegram's outage outlasted one
+                # 30s backoff window, so retry up to 3 times total, each
+                # time waiting out whatever backoff window is currently
+                # active (capped per-wait so one single FLOOD_WAIT can't
+                # make us hang) -- bounded overall so a genuinely longer
+                # outage still fails honestly instead of hanging forever.
+                _MAX_RETRIES = 3
+                _MAX_SINGLE_WAIT = 45  # don't sit through one huge FLOOD_WAIT
+                _MAX_TOTAL_WAIT = 150  # hard ceiling across all retries combined
+                _total_waited = 0.0
+                for _attempt in range(1, _MAX_RETRIES + 1):
+                    try:
+                        from core import _pyro_flood_wait_until as _pfw
+                    except Exception:
+                        _pfw = 0.0
+                    _remaining = max(0.0, _pfw - time.time())
+                    _wait = min(_remaining + 2, _MAX_SINGLE_WAIT) if _remaining else 5.0
+                    if _total_waited + _wait > _MAX_TOTAL_WAIT:
+                        break
+                    _total_waited += _wait
+                    await _set_step(0, None, int(_wait))
+                    await asyncio.sleep(_wait)
                     try:
                         result_path = await download_large_file_to_disk(
                             chat_id, reply["message_id"], disk_src_path, progress_cb=_dl_progress)
@@ -15142,11 +15154,14 @@ async def handle_combo_wm_h_f_command(msg: dict, combo: dict):
                                 os.remove(result_path)
                             except Exception:
                                 pass
+                        break  # success -- stop retrying
+                    logger.warning(f"[ComboWMHF] retry {_attempt}/{_MAX_RETRIES} failed")
                 if pdf_bytes is None:
                     if status_msg_id:
                         await edit_msg(chat_id, status_msg_id,
                             "❌ ফাইল 50MB+ এবং বড় ফাইল ডাউনলোডের জন্য দরকারি সংযোগ (userbot) "
-                            "সাময়িকভাবে অনুপলব্ধ (Telegram সাইডের সমস্যা)। একটু পরে আবার চেষ্টা করো।")
+                            "কয়েকবার চেষ্টার পরও সাময়িকভাবে অনুপলব্ধ (Telegram সাইডের সমস্যা)। "
+                            "কিছুক্ষণ পর আবার চেষ্টা করো।")
                     return
         if pdf_bytes is None:
             try:
