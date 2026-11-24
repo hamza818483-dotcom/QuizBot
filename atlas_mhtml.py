@@ -979,7 +979,13 @@ def _format_content_inner(element, img_map):
         if len(kids) == 2:
             base_t = kids[0].get_text(strip=True)
             over_t = kids[1].get_text(strip=True)
-            if over_t in VECTOR_OVERLAY_ARROWS and base_t and base_t not in ARROW_MOVER_MAP:
+            # Only a single letter/symbol token can be vectorized by this
+            # MathML overlay rule. A literal ordinary arrow (→) in text,
+            # including arrows inside phrases/formulas, must never be changed
+            # into a combining vector mark. Plain-text arrows are preserved.
+            if (over_t in VECTOR_OVERLAY_ARROWS
+                    and re.fullmatch(r'[A-Za-z\u0370-\u03FF\u0980-\u09FF]', base_t)
+                    and base_t not in ARROW_MOVER_MAP):
                 mover.replace_with(base_t + '\u20D7')
                 continue
             if over_t in HAT_OVERLAY_CHARS and base_t and base_t not in ARROW_MOVER_MAP:
