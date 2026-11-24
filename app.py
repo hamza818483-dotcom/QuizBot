@@ -40517,6 +40517,7 @@ async def handle_message(msg: dict):
             except Exception:
                 pass
         if _is_html_like:
+            await send_msg(chat_id, "✅ File পেয়েছি, প্রসেস শুরু হচ্ছে...")
             await _mhtml_auto_queue.put(msg)
             qsize = _mhtml_auto_queue.qsize()
             if qsize > 1:
