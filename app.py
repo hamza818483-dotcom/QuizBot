@@ -14897,25 +14897,82 @@ async def _remove_watermark_from_pdf_task(chat_id: int, file_id: str, wm_text: O
                     + "\n🛑 Job cancelled by user.")
             return
 
-        if status_msg_id:
-            await edit_msg(chat_id, status_msg_id,
-                _build_dwm_dashboard(orig_filename, 1, 1, start_time, "✅ সম্পন্ন!"),
-                parse_mode="HTML")
-
         out_name = _tg_safe_filename(orig_filename, default="dewatermarked.pdf")
         name_line = f"📄 {orig_filename}\n" if orig_filename else ""
         pages_line = ""
         if page_indices is not None and page_chunks == [page_indices]:
             pages_line = f"📍 Pages: {', '.join(str(i + 1) for i in page_indices)}\n"
-        send_res = await send_document(chat_id, clean_bytes,
-            out_name,
-            caption=f"{name_line}{pages_line}✅ Watermark removed",
-            mime_type="application/pdf"
-        )
-        if not send_res.get("ok"):
-            err = send_res.get("error") or send_res.get("description") or "unknown error"
-            logger.error(f"[DWM] send_document failed: {err}")
-            await send_msg(chat_id, f"❌ পাঠাতে ব্যর্থ: {err}")
+        caption = f"{name_line}{pages_line}✅ Watermark removed"
+
+        out_size = len(clean_bytes)
+        out_size_mb = out_size / 1024 / 1024
+        TG_BOT_UPLOAD_LIMIT = 50 * 1024 * 1024
+
+        def _send_stage_dash(pct: int, stage: str) -> str:
+            # Same dashboard shell as processing, now repurposed for the
+            # send phase so the user sees ONE continuous live view instead
+            # of processing-dashboard -> silent gap -> final message.
+            return _build_dwm_dashboard(orig_filename, pct, 100, start_time, stage,
+                                         extra_line=f"💾 Output size: {out_size_mb:.1f}MB")
+
+        if out_size > TG_BOT_UPLOAD_LIMIT and RELAY_GROUP_CHAT_ID and chat_id != RELAY_GROUP_CHAT_ID:
+            # >50MB path: bot API can't upload directly to the user's DM,
+            # so route via the relay group then forward -- same pattern as
+            # /cut -- but now with the SAME live dashboard reporting each
+            # sub-step (relay upload -> forward -> done) + %, instead of
+            # jumping straight to a plain status line.
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id,
+                    _send_stage_dash(70, "📤 Relay group-এ আপলোড হচ্ছে (50MB+)"), parse_mode="HTML")
+            relay_res = await send_document(RELAY_GROUP_CHAT_ID, clean_bytes, out_name, caption=caption)
+            if not relay_res.get("ok"):
+                err = relay_res.get("error") or relay_res.get("description") or "unknown error"
+                logger.error(f"[DWM] relay group send_document failed: {err}")
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id, f"❌ Relay group এ পাঠাতে ব্যর্থ: {err}")
+                return
+            relay_msg_id = relay_res.get("result", {}).get("message_id")
+
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id,
+                    _send_stage_dash(90, "📨 DM-এ forward করা হচ্ছে"), parse_mode="HTML")
+            fwd_res = await tg_post("forwardMessage", {
+                "chat_id": chat_id,
+                "from_chat_id": RELAY_GROUP_CHAT_ID,
+                "message_id": relay_msg_id,
+            })
+            if not fwd_res.get("ok"):
+                err = fwd_res.get("error") or fwd_res.get("description") or "unknown error"
+                logger.error(f"[DWM] forwardMessage to DM failed: {err}")
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id,
+                        f"❌ DM এ forward করতে ব্যর্থ: {err}\n(Group এ ফাইলটা আছে)")
+                return
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id,
+                    _send_stage_dash(100, "✅ সম্পন্ন! (50MB+ হওয়ায় relay group হয়ে পাঠানো হয়েছে)"),
+                    parse_mode="HTML")
+        elif out_size > TG_BOT_UPLOAD_LIMIT and not RELAY_GROUP_CHAT_ID:
+            logger.error("[DWM] output >50MB but RELAY_GROUP_CHAT_ID/CHAT_ID env var not set")
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id,
+                    _send_stage_dash(70, "❌ ফাইল 50MB+ কিন্তু relay group configure করা নেই (CHAT_ID env var)।"),
+                    parse_mode="HTML")
+            return
+        else:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id,
+                    _send_stage_dash(90, "📤 PDF পাঠানো হচ্ছে"), parse_mode="HTML")
+            send_res = await send_document(chat_id, clean_bytes,
+                out_name, caption=caption, mime_type="application/pdf")
+            if not send_res.get("ok"):
+                err = send_res.get("error") or send_res.get("description") or "unknown error"
+                logger.error(f"[DWM] send_document failed: {err}")
+                await send_msg(chat_id, f"❌ পাঠাতে ব্যর্থ: {err}")
+                return
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id,
+                    _send_stage_dash(100, "✅ সম্পন্ন!"), parse_mode="HTML")
     except Exception as e:
         await send_msg(chat_id, f"❌ De-watermark error: {e}")
 
