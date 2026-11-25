@@ -3236,18 +3236,17 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str, footer_text: str
             # `writer` FIRST (add_page returns writer's own copy of the page),
             # then merge the overlay onto that writer-owned copy.
             #
-            # 2026-11-25 FIX #2: merge_page() defaults to over=True, which
-            # draws the overlay ON TOP of the original page content -- so
-            # the watermark text sat visually in front of/over the PDF's
-            # own text instead of behind it (reported: "ATLAS" overlapping
-            # on top of the question text). over=False draws the overlay
-            # BEHIND the original page content instead, which is what a
-            # watermark needs. The footer red box (opt-in, include_footer)
-            # occupies a thin strip at the very bottom of the page that the
-            # source PDF's own content doesn't normally reach, so it still
-            # reads as a solid box on top in practice even with over=False.
+            # 2026-11-25 FIX #2 (tried, reverted): over=False put the
+            # watermark fully BEHIND the original page content, which hid
+            # it completely on PDFs that have their own opaque/white page
+            # background beneath the visible text (common on scanned or
+            # print-sourced PDFs) -- reported as "watermark not showing at
+            # all" after switching to over=False. Back to over=True (drawn
+            # on top), relying on the light solid-gray fill color (not
+            # alpha) from the FIX above to keep it subtle without
+            # overpowering the page's own text.
             written_page = writer.add_page(page)
-            written_page.merge_page(overlay.pages[0], over=False)
+            written_page.merge_page(overlay.pages[0], over=True)
             # Free this page's overlay canvas/packet/reader before the next
             # page -- on a large multi-page PDF these otherwise pile up as
             # live references (each holds its own reportlab buffer +
