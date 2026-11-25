@@ -3235,8 +3235,19 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str, footer_text: str
             # on a page still owned by `reader` -- the page must be attached to
             # `writer` FIRST (add_page returns writer's own copy of the page),
             # then merge the overlay onto that writer-owned copy.
+            #
+            # 2026-11-25 FIX #2: merge_page() defaults to over=True, which
+            # draws the overlay ON TOP of the original page content -- so
+            # the watermark text sat visually in front of/over the PDF's
+            # own text instead of behind it (reported: "ATLAS" overlapping
+            # on top of the question text). over=False draws the overlay
+            # BEHIND the original page content instead, which is what a
+            # watermark needs. The footer red box (opt-in, include_footer)
+            # occupies a thin strip at the very bottom of the page that the
+            # source PDF's own content doesn't normally reach, so it still
+            # reads as a solid box on top in practice even with over=False.
             written_page = writer.add_page(page)
-            written_page.merge_page(overlay.pages[0])
+            written_page.merge_page(overlay.pages[0], over=False)
             # Free this page's overlay canvas/packet/reader before the next
             # page -- on a large multi-page PDF these otherwise pile up as
             # live references (each holds its own reportlab buffer +
