@@ -14823,15 +14823,31 @@ async def _remove_watermark_from_pdf_task(chat_id: int, file_id: str, wm_text: O
 
         # Grand totals across every chunk, for one continuous done/total
         # dashboard instead of it resetting to 0 at each chunk boundary.
-        _chunk_sizes = [len(c) if c is not None else 1 for c in page_chunks]
+        # FIX: a None chunk means "whole doc, size unknown until core.py
+        # opens it" -- guessing 1 here made grand_total wildly too small
+        # (e.g. a 19-page PDF showed 19/1 = 1900%). Placeholder 0 for those
+        # until the real `total` arrives via the first progress_cb call for
+        # that chunk, then _chunk_sizes is patched in place below.
+        _chunk_sizes = [len(c) if c is not None else 0 for c in page_chunks]
+        _unknown_chunks = {i for i, c in enumerate(page_chunks) if c is None}
         grand_total = sum(_chunk_sizes) or 1
         grand_done_base = {"v": 0}
 
         def _cancel_check():
             return job_id is not None and CURRENT_JOB_ID.get(chat_id) != job_id or is_cancelled(chat_id)
 
+        _cur_chunk_idx = {"v": 0}
+
         def _progress(done, total, page_no, stage):
+            nonlocal grand_total
             now = time.time()
+            # Resolve an unknown (None-chunk) size the first time we learn
+            # the real total for it, so grand_total stops under-counting.
+            ci = _cur_chunk_idx["v"]
+            if ci in _unknown_chunks and _chunk_sizes[ci] != total:
+                grand_total += total - _chunk_sizes[ci]
+                _chunk_sizes[ci] = total
+                _unknown_chunks.discard(ci)
             g_done = grand_done_base["v"] + done
             pct = int(g_done / grand_total * 100) if grand_total else 0
             # Throttle: at most ~1 edit/1.5s, always edit on first/last page.
@@ -14868,10 +14884,11 @@ async def _remove_watermark_from_pdf_task(chat_id: int, file_id: str, wm_text: O
                 # result is the whole (fully processed) document.
                 _extract_this_pass = (page_indices is not None and chunk == page_indices
                                        and _ci == is_last_chunk_idx)
+                _cur_chunk_idx["v"] = _ci
                 working_bytes = await asyncio.to_thread(
                     remove_watermark_from_pdf_paged, working_bytes, wm_text, chunk,
                     _progress, _cancel_check, _cache_get, _cache_put, _extract_this_pass)
-                grand_done_base["v"] += len(chunk) if chunk is not None else 1
+                grand_done_base["v"] += _chunk_sizes[_ci]
             clean_bytes = working_bytes
         except WatermarkCancelled:
             if status_msg_id:
