@@ -609,7 +609,12 @@ async function d1Set(request) {
     ).bind(key, value, Math.floor(Date.now() / 1000) + ttl).run();
     return jsonResp({ ok: true });
   } catch (e) {
-    return jsonResp({ ok: false, error: e.message }, 500);
+    // 2026-11-25: bare e.message often came back empty/unhelpful on D1
+    // errors (busy/lock/quota), leaving the bot's logs with only a status
+    // code and no way to tell WHY -- include name + message + a short
+    // stack so repeated 500s are actually debuggable from the bot side.
+    return jsonResp({ ok: false, error: `${e.name || "Error"}: ${e.message || e}`,
+      detail: (e.stack || "").split("\n").slice(0, 3).join(" | ") }, 500);
   }
 }
 

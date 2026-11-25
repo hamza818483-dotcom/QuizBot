@@ -306,6 +306,12 @@ _install_asyncio_exception_handler()
 
 # ── In-memory KV fallback (used when CF Worker is down) ──
 _mem_kv: dict = {}
+# Dedup repeated "[D1] set FAILED for key=X" spam when the SAME key fails
+# back-to-back (e.g. live-quiz state hammering qs_{uid} every few seconds
+# during a CF D1 outage) -- log once per key per outage window instead of
+# once per call, so one real incident doesn't flood the error log.
+_d1_set_fail_last: dict = {}  # key -> last logged timestamp
+_D1_SET_FAIL_LOG_INTERVAL = 60  # seconds between repeat warnings for the same key
 
 async def d1_set(key: str, value: dict, ttl: int = 86400):
     """2026-11-18 (user request): CF Worker's /d1/set was returning bare
@@ -332,10 +338,14 @@ async def d1_set(key: str, value: dict, ttl: int = 86400):
             last_err = e
         if attempt < 2:
             await asyncio.sleep(0.4 * (attempt + 1))  # 0.4s, 0.8s backoff
-    if last_err:
-        logger.warning(f"[D1] set FAILED for key={key} after 3 attempts (using memory fallback): {last_err}")
-    else:
-        logger.warning(f"[D1] set FAILED for key={key} after 3 attempts -- CF Worker returned HTTP {last_status} every time (using memory fallback)")
+    _now = time.time()
+    _last = _d1_set_fail_last.get(key, 0)
+    if _now - _last >= _D1_SET_FAIL_LOG_INTERVAL:
+        _d1_set_fail_last[key] = _now
+        if last_err:
+            logger.warning(f"[D1] set FAILED for key={key} after 3 attempts (using memory fallback): {last_err}")
+        else:
+            logger.warning(f"[D1] set FAILED for key={key} after 3 attempts -- CF Worker returned HTTP {last_status} every time (using memory fallback, repeats suppressed for {_D1_SET_FAIL_LOG_INTERVAL}s)")
     return True
 
 async def d1_get(key: str) -> dict:
