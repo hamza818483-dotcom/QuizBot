@@ -32160,7 +32160,8 @@ async def _handle_omr_impl(msg: dict):
             return
 
         await process_qbm_pages(chat_id, uid, uname, extracted_pages, topic,
-            channel_id, False, file_name, status_msg_id, thread_id, skip_extract=True)
+            channel_id, False, file_name, status_msg_id, thread_id, skip_extract=True,
+            pair_note=_pair_note)
 
     except _DownloadCancelled:
         await _dl_cancel_cleanup(chat_id, status_msg_id)
@@ -37386,13 +37387,20 @@ async def process_qbm_pages(
     thread_id: int = None,
     skip_extract: bool = False,
     file_id: str = None,
-    page_range_str: str = None
+    page_range_str: str = None,
+    pair_note: str = ""
 ):
     """
     QBM posting loop. If skip_extract=True, `pages` is already a list of
     (page_num, img, mcqs) tuples from qbm_extract_all_pages() -- extraction
     (and the 3-call pipeline + answer backfill) already happened in Phase 1,
     so this function only posts to Telegram / builds the CSV.
+
+    pair_note (opt-in, default ""): /omr-only page-pair 100-MCQ soft-check
+    note (see _omr_pairwise_100_note) appended to the channel-path CSV
+    caption below, same as the no-channel/direct-CSV path already does.
+    Every other caller (/qbm, /topic, etc.) leaves this "" so their caption
+    is unchanged.
     """
     settings = await db_get_settings()
     tag = settings.get("tag", "")
@@ -37730,7 +37738,7 @@ async def process_qbm_pages(
             writer.writerow(row)
         await send_document(chat_id, buf.getvalue().encode("utf-8"),
             f"{topic}_QBM.csv",
-            caption=f"📋 {topic} — {len(all_mcqs_csv)} MCQ (Extracted){_model_caption_line(all_mcqs_csv)}",
+            caption=f"📋 {topic} — {len(all_mcqs_csv)} MCQ (Extracted){_model_caption_line(all_mcqs_csv)}{pair_note}",
             mime_type="text/csv")
 
     if not csv_only and summary_pages:
