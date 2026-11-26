@@ -28456,6 +28456,10 @@ TASK — MISS-CHECK ONLY (do not verify/correct the ones above, that happens sep
    or very similar question)? If NOT present, it was MISSED.
 3) Pay special attention to the LAST MCQ on the page and the BOTTOM of the page — most commonly
    missed — but this is in ADDITION to the full scan above, not instead of it.
+3b) SOURCE-GROUNDING (absolute): only report an MCQ here if it is ACTUALLY, physically printed
+   on this page image — never invent/hallucinate one from memory or outside knowledge just to
+   "complete" a numbered sequence (e.g. never add a fake question ৫ just because ৪ and ৬ exist
+   on the page). If you cannot find it on the page, do not report it.
 4) If NOTHING was missed (the common case), output an empty array: []
 5) If MCQs were missed, output ONLY those missed MCQs (do not repeat the ones already in the
    list above) in the same strict format: options in the exact source position order, A/B/C/D
@@ -28569,6 +28573,11 @@ async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True, g
    (self-contained), same as Call 1's rule.
 3) Pay special attention to the LAST MCQ on the page and the BOTTOM of the page — most commonly
    missed — but this is in ADDITION to the full scan above, not instead of it.
+4) SOURCE-GROUNDING (absolute, applies to miss-check additions too): only add an MCQ here if it
+   is ACTUALLY, physically printed on this page image — never invent/hallucinate one from memory
+   or outside knowledge just to "complete" a numbered sequence (e.g. never add a fake question
+   just because neighboring question numbers exist on the page). If you cannot find it on the
+   page, do not add it.
 
 """ if do_miss_check else ""
         task_line = ("do BOTH steps below in this single pass" if do_miss_check
@@ -28639,6 +28648,13 @@ complete, untruncated, corrected question/options in your response:
    qsn_bbox covering that actual diagram (never leave just the caption text uncropped). If
    qsn_bbox was given but the question has NO actual diagram, remove it (set to null). Never
    invent a bbox for options — options never get any bbox/image.
+9) FABRICATION CHECK (mandatory, final gate before output): for EVERY MCQ in this list (from
+   Call 1 or from your own miss-check above), confirm it is genuinely, physically printed on
+   this page image — re-locate its exact question text on the page right now. If any MCQ in the
+   list cannot actually be found anywhere on this page (invented/hallucinated, e.g. pulled from
+   outside knowledge or guessed to fill a numbered sequence), DELETE it entirely from the output
+   list — never keep a fabricated MCQ just because it was already in the input list above.
+
 CRITICAL: OUTPUT LIST ORDER (mandatory) — never move an MCQ to the end or anywhere else just
 because it needed a fix — fix it in place, at its original index.
 
