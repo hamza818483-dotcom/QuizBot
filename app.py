@@ -6597,7 +6597,7 @@ async def _gemini_verify_raw_text(img, prompt: str, _fallback_model: str = None)
     fallback).
 
     2026-10-24: before giving up entirely, retries once more against
-    gemini-3.5-flash-lite -- a separate free-tier quota bucket from
+    gemini-3.1-flash-lite -- a separate free-tier quota bucket from
     gemini-3.6-flash (same provider, no Groq touched)."""
     try:
         if not key_rotator.keys:
@@ -6714,10 +6714,10 @@ async def _gemini_verify_raw_text(img, prompt: str, _fallback_model: str = None)
                 logger.warning(f"[GeminiVerify] key {key[:12]}... failed, trying next key: {e}")
                 continue
         if _fallback_model is None:
-            logger.warning(f"[GeminiVerify] all {len(keys_to_try)} gemini-3.6-flash key(s) failed — retrying with gemini-3.5-flash-lite (separate quota)")
-            return await _gemini_verify_raw_text(img, prompt, _fallback_model="gemini-3.5-flash-lite")
-        if _fallback_model == "gemini-3.5-flash-lite":
-            logger.warning(f"[GeminiVerify] all {len(keys_to_try)} gemini-3.5-flash-lite key(s) failed — retrying with gemini-3.5-flash (separate quota)")
+            logger.warning(f"[GeminiVerify] all {len(keys_to_try)} gemini-3.6-flash key(s) failed — retrying with gemini-3.1-flash-lite (separate quota)")
+            return await _gemini_verify_raw_text(img, prompt, _fallback_model="gemini-3.1-flash-lite")
+        if _fallback_model == "gemini-3.1-flash-lite":
+            logger.warning(f"[GeminiVerify] all {len(keys_to_try)} gemini-3.1-flash-lite key(s) failed — retrying with gemini-3.5-flash (separate quota)")
             return await _gemini_verify_raw_text(img, prompt, _fallback_model="gemini-3.5-flash")
         if _fallback_model == "gemini-3.5-flash":
             logger.warning(f"[GeminiVerify] all {len(keys_to_try)} gemini-3.5-flash key(s) failed — retrying with gemini-4-hydrogen (separate compute pool)")
@@ -18720,7 +18720,7 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str, _fallback_model: str
     no Groq/OpenRouter fallback.
 
     2026-10-24: before giving up entirely, retries once more against
-    gemini-3.5-flash-lite -- a separate free-tier quota bucket from
+    gemini-3.1-flash-lite -- a separate free-tier quota bucket from
     gemini-3.6-flash (still Gemini-only, no other provider touched)."""
     try:
         from pdf_handler import (key_rotator, image_to_base64, _is_gemini_key_exhausted_today,
@@ -18741,8 +18741,8 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str, _fallback_model: str
                                                        _fallback_model=(None if _skip_to == "gemini-3.6-flash" else _skip_to))
         _consec_outage_fails = 0
         if _fallback_model is None and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
-            logger.warning("[Dagano] all gemini-3.6-flash keys already known daily-exhausted — retrying with gemini-3.5-flash-lite (separate quota)")
-            return await _dagano_gemini_raw_multi(imgs, prompt, _fallback_model="gemini-3.5-flash-lite")
+            logger.warning("[Dagano] all gemini-3.6-flash keys already known daily-exhausted — retrying with gemini-3.1-flash-lite (separate quota)")
+            return await _dagano_gemini_raw_multi(imgs, prompt, _fallback_model="gemini-3.1-flash-lite")
         from google import genai as gai
         from google.genai import types
         img_bytes_list = []
@@ -18871,10 +18871,10 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str, _fallback_model: str
                 logger.warning(f"[Dagano] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
         if _fallback_model is None:
-            logger.warning("[Dagano] All gemini-3.6-flash keys exhausted — retrying with gemini-3.5-flash-lite (separate quota)")
-            return await _dagano_gemini_raw_multi(imgs, prompt, _fallback_model="gemini-3.5-flash-lite")
-        if _fallback_model == "gemini-3.5-flash-lite":
-            logger.warning("[Dagano] All gemini-3.5-flash-lite keys exhausted — retrying with gemini-3.5-flash (separate quota)")
+            logger.warning("[Dagano] All gemini-3.6-flash keys exhausted — retrying with gemini-3.1-flash-lite (separate quota)")
+            return await _dagano_gemini_raw_multi(imgs, prompt, _fallback_model="gemini-3.1-flash-lite")
+        if _fallback_model == "gemini-3.1-flash-lite":
+            logger.warning("[Dagano] All gemini-3.1-flash-lite keys exhausted — retrying with gemini-3.5-flash (separate quota)")
             return await _dagano_gemini_raw_multi(imgs, prompt, _fallback_model="gemini-3.5-flash")
         if _fallback_model == "gemini-3.5-flash":
             logger.warning("[Dagano] All gemini-3.5-flash keys exhausted — retrying with gemini-4-hydrogen (separate compute pool)")
@@ -21217,7 +21217,7 @@ async def pdf_generate_all_pages(
         _current_job_chat_id_ctx.set(chat_id)
         mcqs = []
         # PAGE-STALL GUARD (2026-11-22, user request): 3-stage chain —
-        # gemini-3.6 (2min) -> gemini-3.5-flash-lite (40s) -> gemini-3.6
+        # gemini-3.6 (2min) -> gemini-3.1-flash-lite (40s) -> gemini-3.6
         # again (40s) -> skip page, move to next. Each stage after the
         # first uses a bumped key_offset (not the same slot) so a stuck
         # orphaned thread from a cancelled stage (asyncio.wait_for cannot
@@ -21249,7 +21249,7 @@ async def pdf_generate_all_pages(
         # uses a different key_offset.
         stages = [
             ("gemini-3.6",            slot,     120, None),
-            ("gemini-3.5-flash-lite", slot + 1, 40,  "gemini-3.5-flash-lite"),
+            ("gemini-3.1-flash-lite", slot + 1, 40,  "gemini-3.1-flash-lite"),
             ("gemini-3.6",            slot + 2, 40,  "gemini-3.6"),
         ]
         for i, (model_label, key_off, timeout_s, forced_model) in enumerate(stages):
@@ -29497,7 +29497,7 @@ async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = False) -> l
 _v_stage_cb_ctx = contextvars.ContextVar("v_stage_cb", default=None)
 # 2026-11-19 (user request): if a single /qbm page is stuck for 2 minutes
 # (API hang/dead key/etc.), instead of giving up on that page, retry it
-# forcing gemini-3.5-flash-lite (separate quota bucket, usually fast/free
+# forcing gemini-3.1-flash-lite (separate quota bucket, usually fast/free
 # when gemini-3.6-flash is the one hanging) rather than skipping straight
 # to abandonment. Set around the retry call only; _qbm_gemini_raw's very
 # first (non-recursive) call checks this to pick its starting model.
@@ -29903,14 +29903,14 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
         # burning a fresh 429 per key on every single /qbm page.
         # 2026-10-24: this tracker is keyed by raw API key only, not
         # (key, model) -- it does NOT distinguish gemini-3.6-flash from
-        # gemini-3.5-flash-lite quota. So on the fallback pass
+        # gemini-3.1-flash-lite quota. So on the fallback pass
         # (_fallback_model set) we must NOT trust it, or every fallback
         # call would short-circuit here even though 3.5-flash-lite's
         # quota is a completely separate, still-fresh bucket.
         if _fallback_model is None and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
             if gemini_only:
-                logger.warning("[QBM] all gemini-3.6-flash keys already known daily-exhausted — retrying with gemini-3.5-flash-lite (separate quota)")
-                return await _qbm_gemini_raw(img, prompt, careful=careful, gemini_only=gemini_only, _fallback_model="gemini-3.5-flash-lite")
+                logger.warning("[QBM] all gemini-3.6-flash keys already known daily-exhausted — retrying with gemini-3.1-flash-lite (separate quota)")
+                return await _qbm_gemini_raw(img, prompt, careful=careful, gemini_only=gemini_only, _fallback_model="gemini-3.1-flash-lite")
             logger.warning("[QBM] all Gemini keys already known daily-exhausted — skipping straight to Groq")
             return await _gen_groq_raw_text(img, prompt)
         from google import genai as gai
@@ -29923,7 +29923,7 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 api_key=key,
                 http_options=types.HttpOptions(timeout=38000)
             )
-            # 2026-11-18 FIX: gemini-3.5-flash-lite rejects thinking_config
+            # 2026-11-18 FIX: gemini-3.1-flash-lite rejects thinking_config
             # entirely (400 INVALID_ARGUMENT on EVERY key, not a per-key
             # issue) -- unlike 3.6-flash/3.5-flash/4-hydrogen which accept
             # thinking_budget=0. Confirmed from prod logs: the fallback
@@ -29944,7 +29944,7 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 max_output_tokens=24576,
                 response_mime_type="application/json",
             )
-            if model_name != "gemini-3.5-flash-lite":
+            if model_name != "gemini-3.1-flash-lite":
                 _cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=768 if careful else 0)
             return client.models.generate_content(
                 model=model_name,
@@ -29957,7 +29957,7 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
 
         _avoid_accts = _qbm_page_used_accounts_ctx.get() or set()
         if _fallback_model is not None:
-            # 2026-10-24: the fallback pass (gemini-3.5-flash-lite, a
+            # 2026-10-24: the fallback pass (gemini-3.1-flash-lite, a
             # SEPARATE free-tier quota bucket from gemini-3.6-flash) must
             # NOT be filtered by key_rotator's cooldown/daily-exhausted
             # state -- that state was set by 3.6-flash's 429s and says
@@ -30277,16 +30277,16 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 continue
         # All gemini-3.6-flash keys exhausted/rate-limited/errored.
         # 2026-10-24: before giving up, retry the SAME key pool once more
-        # against gemini-3.5-flash-lite -- a different model = a separate
+        # against gemini-3.1-flash-lite -- a different model = a separate
         # per-model free-tier quota bucket (~500 RPD vs ~20 RPD for
         # 3.6-flash), still Gemini (no Groq), still vision-capable. Only
         # done once (guarded by _fallback_model is None) so this can't
         # recurse into itself.
         if _fallback_model is None:
-            logger.warning("[QBM] All gemini-3.6-flash keys exhausted — retrying with gemini-3.5-flash-lite (separate quota)")
-            return await _qbm_gemini_raw(img, prompt, careful=careful, gemini_only=gemini_only, _fallback_model="gemini-3.5-flash-lite")
-        if _fallback_model == "gemini-3.5-flash-lite":
-            logger.warning("[QBM] All gemini-3.5-flash-lite keys exhausted — retrying with gemini-3.5-flash (separate quota)")
+            logger.warning("[QBM] All gemini-3.6-flash keys exhausted — retrying with gemini-3.1-flash-lite (separate quota)")
+            return await _qbm_gemini_raw(img, prompt, careful=careful, gemini_only=gemini_only, _fallback_model="gemini-3.1-flash-lite")
+        if _fallback_model == "gemini-3.1-flash-lite":
+            logger.warning("[QBM] All gemini-3.1-flash-lite keys exhausted — retrying with gemini-3.5-flash (separate quota)")
             return await _qbm_gemini_raw(img, prompt, careful=careful, gemini_only=gemini_only, _fallback_model="gemini-3.5-flash")
         if _fallback_model == "gemini-3.5-flash":
             logger.warning("[QBM] All gemini-3.5-flash keys exhausted — retrying with gemini-4-hydrogen (separate compute pool)")
@@ -30314,7 +30314,7 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
     callers (per user request 2026-09-04).
 
     2026-10-24: in both branches, before truly giving up, retries once
-    more against gemini-3.5-flash-lite -- a separate free-tier quota
+    more against gemini-3.1-flash-lite -- a separate free-tier quota
     bucket from gemini-3.6-flash (still Gemini, Groq behavior unchanged
     either way)."""
     _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Gemini")
@@ -30518,10 +30518,10 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
                 logger.warning(f"[QBM] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
         if _fallback_model is None:
-            logger.warning("[QBM] All gemini-3.6-flash keys exhausted (multi-image) — retrying with gemini-3.5-flash-lite (separate quota)")
-            return await _qbm_gemini_raw_multi(imgs, prompt, gemini_only=gemini_only, _fallback_model="gemini-3.5-flash-lite")
-        if _fallback_model == "gemini-3.5-flash-lite":
-            logger.warning("[QBM] All gemini-3.5-flash-lite keys exhausted (multi-image) — retrying with gemini-3.5-flash (separate quota)")
+            logger.warning("[QBM] All gemini-3.6-flash keys exhausted (multi-image) — retrying with gemini-3.1-flash-lite (separate quota)")
+            return await _qbm_gemini_raw_multi(imgs, prompt, gemini_only=gemini_only, _fallback_model="gemini-3.1-flash-lite")
+        if _fallback_model == "gemini-3.1-flash-lite":
+            logger.warning("[QBM] All gemini-3.1-flash-lite keys exhausted (multi-image) — retrying with gemini-3.5-flash (separate quota)")
             return await _qbm_gemini_raw_multi(imgs, prompt, gemini_only=gemini_only, _fallback_model="gemini-3.5-flash")
         if _fallback_model == "gemini-3.5-flash":
             logger.warning("[QBM] All gemini-3.5-flash keys exhausted (multi-image) — retrying with gemini-4-hydrogen (separate compute pool)")
@@ -30546,7 +30546,7 @@ async def _ai_gemini_text_call(prompt: str, gemini_only: bool = False, _fallback
     callers so this shared utility doesn't silently reintroduce Groq.
 
     2026-10-24: before giving up (either branch), retries once more
-    against gemini-3.5-flash-lite -- a separate free-tier quota bucket
+    against gemini-3.1-flash-lite -- a separate free-tier quota bucket
     from gemini-3.6-flash (still Gemini, Groq behavior unchanged)."""
     try:
         from pdf_handler import (key_rotator, _is_gemini_key_exhausted_today,
@@ -30661,10 +30661,10 @@ async def _ai_gemini_text_call(prompt: str, gemini_only: bool = False, _fallback
                 logger.warning(f"[AI] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
         if _fallback_model is None:
-            logger.warning("[AI] all gemini-3.6-flash keys exhausted/failed -- retrying with gemini-3.5-flash-lite (separate quota)")
-            return await _ai_gemini_text_call(prompt, gemini_only=gemini_only, _fallback_model="gemini-3.5-flash-lite")
-        if _fallback_model == "gemini-3.5-flash-lite":
-            logger.warning("[AI] all gemini-3.5-flash-lite keys exhausted/failed -- retrying with gemini-3.5-flash (separate quota)")
+            logger.warning("[AI] all gemini-3.6-flash keys exhausted/failed -- retrying with gemini-3.1-flash-lite (separate quota)")
+            return await _ai_gemini_text_call(prompt, gemini_only=gemini_only, _fallback_model="gemini-3.1-flash-lite")
+        if _fallback_model == "gemini-3.1-flash-lite":
+            logger.warning("[AI] all gemini-3.1-flash-lite keys exhausted/failed -- retrying with gemini-3.5-flash (separate quota)")
             return await _ai_gemini_text_call(prompt, gemini_only=gemini_only, _fallback_model="gemini-3.5-flash")
         if _fallback_model == "gemini-3.5-flash":
             logger.warning("[AI] all gemini-3.5-flash keys exhausted/failed -- retrying with gemini-4-hydrogen (separate compute pool)")
@@ -36651,12 +36651,12 @@ Return ONLY the JSON array, nothing else."""
                 # overload, timeout) on one key was silently returning {}
                 # for the whole page, leaving every MCQ unresolved even
                 # when a real answer-key table was on the page.
-                # 2026-10-24: also retry gemini-3.5-flash-lite (separate
+                # 2026-10-24: also retry gemini-3.1-flash-lite (separate
                 # free-tier quota bucket) if gemini-3.6-flash exhausts.
                 # 2026-11-18: extended to gemini-3.5-flash and
                 # gemini-4-hydrogen (separate compute pool) as further
                 # fallback levels.
-                for _model_pass in ("gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-4-hydrogen"):
+                for _model_pass in ("gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash", "gemini-4-hydrogen"):
                     if result_json is not None:
                         break
                     for _gk in _gkeys[:8]:
@@ -36937,7 +36937,7 @@ async def qbm_extract_all_pages(
                 # must never block the whole job forever -- if a single
                 # page's extraction (API hang/dead key/etc.) exceeds 120s
                 # (2 min) on the primary model, retry that SAME page once
-                # forcing gemini-3.5-flash-lite (separate quota bucket,
+                # forcing gemini-3.1-flash-lite (separate quota bucket,
                 # usually unaffected when gemini-3.6-flash is the one
                 # hanging) with a 40s window. If flash-lite ALSO stalls, the
                 # page is skipped (MUST) and the job moves on to the next
@@ -36947,14 +36947,14 @@ async def qbm_extract_all_pages(
             except asyncio.CancelledError:
                 mcqs = []
             except asyncio.TimeoutError:
-                logger.warning(f"[QBM] page {page_num} timed out after 120s on primary model — retrying with gemini-3.5-flash-lite")
+                logger.warning(f"[QBM] page {page_num} timed out after 120s on primary model — retrying with gemini-3.1-flash-lite")
                 ex_task.cancel()
                 try:
                     await ex_task
                 except Exception:
                     pass
                 try:
-                    await send_msg(chat_id, f"⏱️ Page {page_num}: 2 minute-এও শেষ হয়নি — gemini-3.5-flash-lite দিয়ে আবার চেষ্টা করছি।")
+                    await send_msg(chat_id, f"⏱️ Page {page_num}: 2 minute-এও শেষ হয়নি — gemini-3.1-flash-lite দিয়ে আবার চেষ্টা করছি।")
                 except Exception as _e:
                     logger.warning(f"[QBM] stall-switch DM notice send_msg failed for page {page_num}: {_e}")
                 # 2026-11-20 (user request): live dashboard should also show
@@ -36965,12 +36965,12 @@ async def qbm_extract_all_pages(
                 # block (_build_dashboard_v, strict_calls=True) reads
                 # "v_now" instead, not "stage" -- setting only "stage" left
                 # the switch invisible in DM (bug found 2026-11-20).
-                page_status[idx]["stage"] = "🔁 2min stall — gemini-3.5-flash-lite দিয়ে retry হচ্ছে..."
-                page_status[idx]["v_now"] = "🔁 2min stall — gemini-3.5-flash-lite দিয়ে retry হচ্ছে..."
+                page_status[idx]["stage"] = "🔁 2min stall — gemini-3.1-flash-lite দিয়ে retry হচ্ছে..."
+                page_status[idx]["v_now"] = "🔁 2min stall — gemini-3.1-flash-lite দিয়ে retry হচ্ছে..."
                 page_status[idx]["switched_model"] = True
                 if status_msg_id:
                     _spawn_task(_qbm_safe_dash_edit(force=True))
-                _tok = _qbm_forced_start_model_ctx.set("gemini-3.5-flash-lite")
+                _tok = _qbm_forced_start_model_ctx.set("gemini-3.1-flash-lite")
                 try:
                     retry_task = _spawn_task(_run_extract())
                     retry_watcher = _spawn_task(_watch_cancel_inner(retry_task))
@@ -36982,7 +36982,7 @@ async def qbm_extract_all_pages(
                         # flash-lite also stalled out -- give up on this
                         # page (MUST skip) and move on to the next page,
                         # no further retry stage.
-                        logger.warning(f"[QBM] page {page_num} ALSO timed out after 40s on gemini-3.5-flash-lite — skipping, moving to next page")
+                        logger.warning(f"[QBM] page {page_num} ALSO timed out after 40s on gemini-3.1-flash-lite — skipping, moving to next page")
                         retry_task.cancel()
                         try:
                             await retry_task

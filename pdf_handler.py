@@ -1582,7 +1582,7 @@ def _pdfs_reconcile_mcq_topics(mcqs: list, fallback: str, allowed_topics: list =
 # fallbacks.
 GEMINI_FALLBACK_MODELS = [
     "gemini-3.6-flash",       # 1st choice (primary)
-    "gemini-3.5-flash-lite",  # 2nd choice (fast, generous free-tier quota)
+    "gemini-3.1-flash-lite",  # 2nd choice (fast, generous free-tier quota)
     "gemini-3.5-flash",       # 3rd choice (separate free-tier quota)
     "gemini-4-hydrogen",      # 4th choice (separate compute pool, newest)
 ]
