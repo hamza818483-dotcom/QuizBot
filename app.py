@@ -28732,6 +28732,110 @@ Output ONLY the full corrected JSON array, all fixes applied, same length/order 
         return call1_mcqs
 
 
+# 2026-11-27 (user request, /omr only): CALL 3 — logical question<->option
+# consistency check. Distinct from Call2 (which only verifies the ANSWER
+# matches the source): this checks whether the extracted WORDING itself
+# makes sense. A common OCR/vision misread: the page has a blurry/unclear
+# word, Call1 extracts a similar-looking but wrong word (e.g. "ত্বরণ" read as
+# "সরণ"), and the MCQ silently becomes internally inconsistent -- the
+# question talks about one physical quantity but the OPTIONS (degree values,
+# unit names, etc.) only make sense for a different one. Same idea for
+# conceptually wrong word substitutions (e.g. "স্প্রিং ধ্রুবক" misread as an
+# unrelated-looking string) where the options given are a dead giveaway of
+# what the question must actually be asking.
+# Single call per page (all MCQs batched together, not per-MCQ) -- same
+# pattern as Call2, keeps it to one extra Gemini call per page regardless of
+# MCQ count on that page.
+async def _qbm_call3_logic_consistency(img, mcqs: list, gemini_only: bool = False) -> list:
+    """
+    CALL 3 (single chunk, /omr only) — for every MCQ, check whether the
+    question's wording is LOGICALLY CONSISTENT with its own 4 options (not
+    whether the answer is right -- Call2 already handles that). If a
+    specific word in the question was misread during extraction (common
+    cause: that word was blurry/unclear on the source page) and the options
+    make clear what it should actually say, correct ONLY that word -- never
+    rewrite anything else, never touch an MCQ that's already consistent.
+    """
+    if not mcqs:
+        return mcqs
+    try:
+        mcq_json = json.dumps([
+            {"i": idx, "question": m.get("question", ""), "options": m.get("options", []),
+             "answer": m.get("answer", "A")}
+            for idx, m in enumerate(mcqs)
+        ], ensure_ascii=False)
+
+        prompt = f"""You are given MCQs already extracted from this exact page image:
+{mcq_json}
+
+TASK — LOGICAL CONSISTENCY CHECK ONLY (do not touch the answer, do not re-verify against the
+page's marked answer -- that was already done in a separate pass):
+
+For EACH MCQ, check whether the QUESTION's wording is logically/conceptually consistent with its
+own 4 OPTIONS. A page image can have a blurry/unclear word that got misread during extraction --
+when that happens, the question ends up talking about one concept/quantity while the options only
+make sense for a DIFFERENT one. The options themselves are often the clearest clue to what the
+question must actually be asking, since numeric/unit/terminology clues in them rarely match a
+wrongly-read concept by coincidence.
+
+Example pattern (do not require this exact case, just the same KIND of check): a physics question
+asks about phase difference between a particle's "সরণ" (displacement) and a wave, but the options
+are degree values that only make sense for phase difference between "সরণ" and "ত্বরণ"
+(acceleration) — here "তরঙ্গের" being read instead of "ত্বরণের" is the kind of misread to catch.
+Another kind: a definition-style question names the wrong physical quantity/device/term entirely,
+where the options are clearly definitions of something else, printing that something else's name
+makes the question internally sensible.
+
+STEPS per MCQ:
+1) Read the question and all 4 options together. Ask: holistically, does this question's wording
+   make sense GIVEN these specific options -- or would a different word in the question turn this
+   into an obviously coherent, answerable MCQ?
+2) If something seems off, go back to the actual page IMAGE and re-read that specific part of the
+   question very carefully, character by character if needed, especially any word that could have
+   been visually unclear/blurry/cut off, to find the ACTUAL word that was already there on the page.
+3) If, after re-reading the image, you find the real on-page word is different from what Call 1
+   extracted (confirming it was a misread, not an actual wording choice) AND using it instead
+   makes the question logically consistent with the options above -- correct ONLY that misread
+   word/phrase in the question text. Never invent a word that is not actually on the page just
+   because it would be "more consistent" -- the correction must be grounded in what the image
+   actually shows, re-confirmed by careful re-reading, not guessed from the options alone.
+4) If the question is already consistent with its options, or you cannot confirm an actual
+   different word on the page even after careful re-reading, leave that MCQ's question text
+   completely untouched -- do not force a change.
+5) Never touch options, answer, or any other field. Never reorder the list. Only the "question"
+   field of specific MCQs (very rarely: a less common option-text misread of the same kind) may
+   change.
+
+Output ONLY a JSON array covering every "i" index from the input above, same order, in this
+format -- include ALL MCQs even if unchanged for them, just repeat the field as given:
+[{{"i":0,"question":"...","changed":false}},{{"i":1,"question":"...(corrected)...","changed":true}}]"""
+
+        gem_txt = await _qbm_gemini_raw(img, prompt, gemini_only=gemini_only)
+        raw = _qbm_parse_bare_json_array(gem_txt) if gem_txt else []
+        if not raw:
+            return mcqs
+
+        fixed_count = 0
+        for entry in raw:
+            try:
+                i = entry.get("i")
+                if i is None or not (0 <= i < len(mcqs)):
+                    continue
+                if entry.get("changed") and entry.get("question"):
+                    new_q = _clean_mcq_text(entry["question"])
+                    if new_q and new_q != mcqs[i].get("question", ""):
+                        mcqs[i]["question"] = new_q
+                        fixed_count += 1
+            except Exception:
+                continue
+        if fixed_count:
+            logger.info(f"[OMR Call3] fixed {fixed_count} logically-inconsistent question(s) on this page")
+        return mcqs
+    except Exception as e:
+        logger.warning(f"[OMR Call3] failed, keeping pre-Call3 mcqs: {e}")
+        return mcqs
+
+
 async def _qbm_final_empty_page_scan(img, onu_mode: bool = False, gemini_only: bool = False) -> list:
     """
     CALL 3 (empty-page variant) — used ONLY when Call 1 AND Call 2 BOTH
