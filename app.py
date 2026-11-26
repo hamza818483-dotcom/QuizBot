@@ -28589,12 +28589,23 @@ complete, untruncated, corrected question/options in your response:
    actually in that position in THIS output list (not the source's original label)? If the
    correct option's text sits in position 2 of the output, answer must be "B", etc. Fix any
    mismatch.
-2) ANSWER SOURCE MATCH: does the answer actually match what is marked/given on the page
-   (marked option, inline answer, bottom-of-page answer box/table, or answer key found on
-   another page — scan forward/backward through all pages as needed)? Fix if wrong.
-3) If an MCQ's answer is genuinely unclear from any source → try twice, reasoning it out from
-   context, to determine the most likely correct answer. If STILL unclear after 2 tries, choose
-   your own best answer.
+2) ANSWER SOURCE MATCH (mandatory, highest-priority check — spend real effort here, this is
+   now the single most important step of verification): for EVERY MCQ in the list, independently
+   re-derive the correct answer and cross-check it against the source page before trusting Call
+   1's answer at all:
+   a) First check the page itself for an explicit marked answer (circled/boxed/underlined
+      option, inline "উত্তর: X" / "Ans: X" text, or a bottom-of-page/end-of-section answer
+      box/table) — scan forward AND backward through every other page of this same document for
+      an answer key if the current page doesn't show one directly.
+   b) If no explicit marked answer exists anywhere, work out the correct answer yourself from
+      subject-matter reasoning on the question + options — do this seriously, as if solving the
+      MCQ fresh, not just rubber-stamping whatever Call 1 already put there.
+   c) Compare your independently-derived answer against Call 1's answer. If they disagree, trust
+      your own re-derivation (re-verify once more before finalizing) and overwrite the answer
+      letter. Never leave a wrong answer just because Call 1 already filled one in.
+   d) If truly ambiguous even after your own reasoning AND no answer key is found anywhere →
+      try reasoning it out twice more from context before settling, and only then pick your
+      single most defensible best answer — never leave this blank or guess carelessly.
 4) SPELLING + CONTEXT-WORD CHECK: check question + all options for (a) spelling
    mistakes (Bangla or English), and (b) any word that is spelled fine but is CONTEXTUALLY WRONG
    for this MCQ's subject/topic (e.g. an OCR/extraction slip that swapped in a similar-looking but
