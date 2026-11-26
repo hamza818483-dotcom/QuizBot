@@ -28550,7 +28550,7 @@ async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True, g
             return opts
         mcq_json = json.dumps([
             {"question": (m.get("question", "") or "")[:_q_cap], "options": _trim_opts(m.get("options", [])),
-             "answer": m.get("answer", "A"), "explanation": (m.get("explanation", "") or "")[:60],
+             "answer": m.get("answer", "A"),
              "qsn_bbox": m.get("qsn_bbox")}
             for m in call1_mcqs
         ], ensure_ascii=False)
@@ -28581,10 +28581,10 @@ TASK — {task_line}, connected to Call 1 (do not redo
 full extraction from scratch):
 
 {step_a_text}STEP B — FULL VERIFICATION on this MCQ list — never
-skip or shortcut this, regardless of how confident Call 1 was. NOTE: each MCQ's "question",
-"options", and "explanation" fields above are truncated to save space (just enough to identify
+skip or shortcut this, regardless of how confident Call 1 was. NOTE: each MCQ's "question" and
+"options" fields above are truncated to save space (just enough to identify
 which MCQ is which) — always re-read the FULL text from the actual page image and output the
-complete, untruncated, corrected question/options/explanation in your response:
+complete, untruncated, corrected question/options in your response:
 1) OPTION-SERIAL INTEGRITY: is the answer letter (A/B/C/D) pointing to the option that is
    actually in that position in THIS output list (not the source's original label)? If the
    correct option's text sits in position 2 of the output, answer must be "B", etc. Fix any
@@ -28594,8 +28594,8 @@ complete, untruncated, corrected question/options/explanation in your response:
    another page — scan forward/backward through all pages as needed)? Fix if wrong.
 3) If an MCQ's answer is genuinely unclear from any source → try twice, reasoning it out from
    context, to determine the most likely correct answer. If STILL unclear after 2 tries, choose
-   your own best answer, and base the explanation on that chosen answer.
-4) SPELLING + CONTEXT-WORD CHECK: check question + all options + explanation for (a) spelling
+   your own best answer.
+4) SPELLING + CONTEXT-WORD CHECK: check question + all options for (a) spelling
    mistakes (Bangla or English), and (b) any word that is spelled fine but is CONTEXTUALLY WRONG
    for this MCQ's subject/topic (e.g. an OCR/extraction slip that swapped in a similar-looking but
    unrelated term that doesn't fit the science/subject context) — replace it with the word that
@@ -28605,7 +28605,7 @@ complete, untruncated, corrected question/options/explanation in your response:
    image — fix any truncated/partial word or sentence (e.g. a word cut to only its tail).
 6) Re-confirm option order was never reshuffled and math/chemistry sub/superscripts (H₂O, x²,
    Na⁺ etc.) are correctly rendered everywhere.
-6c) LATEX CHECK: scan question/options/explanation for any raw LaTeX left over from extraction
+6c) LATEX CHECK: scan question/options for any raw LaTeX left over from extraction
    (backslash-vec, backslash-hat, backslash-frac, backslash-sqrt, caret, underscore, curly braces
    used as LaTeX syntax) — convert every one to proper Unicode
    (vectors: A⃗, î, ĵ, k̂; fractions: a/b; roots: √x; sub/superscripts as actual Unicode chars).
@@ -28628,25 +28628,11 @@ complete, untruncated, corrected question/options/explanation in your response:
    qsn_bbox covering that actual diagram (never leave just the caption text uncropped). If
    qsn_bbox was given but the question has NO actual diagram, remove it (set to null). Never
    invent a bbox for options — options never get any bbox/image.
-9) EXPLANATION SOURCE TAG (mandatory, new field): for each MCQ, add "explanation_source" as
-   either "page" (the explanation is copied verbatim from text physically present on the page,
-   e.g. a written ব্যাখ্যা/answer-reasoning block) or "generated" (no such text exists on the
-   page, so the explanation was built from AI knowledge). Be honest and precise about this —
-   it is used for quality auditing, not shown to end users.
-10) EXPLANATION LENGTH (mandatory) — this MUST fit Telegram's poll-explanation box, hard cap
-   ~265 characters. If explanation_source="page" (text is physically on the page): use it as-is
-   if it already fits within ~265 characters; if the on-page text is longer than that, trim it
-   down to the most essential 2-3 sentences (still page-sourced, just condensed) rather than
-   discarding it for a generated one. If explanation_source="generated" (nothing on the page):
-   write a fresh 2-3 sentence explanation (why the answer is correct + one relevant fact) that
-   stays within ~265 characters — never a single one-line answer restatement, never a wall of
-   text past the limit.
-
 CRITICAL: OUTPUT LIST ORDER (mandatory) — never move an MCQ to the end or anywhere else just
 because it needed a fix — fix it in place, at its original index.
 
 Output ONLY the full corrected JSON array, all fixes applied, same length/order as input:
-[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated","qsn_bbox":[100,200,400,450]}}]"""
+[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","qsn_bbox":[100,200,400,450]}}]"""
 
         gem_txt = await _qbm_gemini_raw(img, prompt)
         result = _qbm_parse_json(gem_txt) if gem_txt else []
