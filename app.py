@@ -1139,6 +1139,14 @@ async def handle_cancel_command(msg: dict):
     if not await db_is_owner_or_admin(uid):
         return
     CANCEL_FLAGS[chat_id] = True
+    # 2026-11-27 (user request — "cancel kori ni, tyle off holo keno"):
+    # CANCEL_FLAGS has exactly 2 set-sites in the whole codebase (this one +
+    # the jobcancel_ button handler below) -- both explicit admin/owner
+    # action, nothing auto-triggers it. Logging WHO (uid) and WHICH job was
+    # running makes the next occurrence traceable from logs alone instead
+    # of having to guess (duplicate Telegram webhook delivery re-firing an
+    # old /cancel, a different admin cancelling, etc).
+    logger.warning(f"[Cancel] /cancel command fired for chat_id={chat_id} by uid={uid} — running job was: {ACTIVE_JOB_LABEL.get(chat_id) or 'none'}")
     running_label = ACTIVE_JOB_LABEL.get(chat_id)
     if running_label:
         await send_msg(chat_id, "🛑 বন্ধ করা হলো।\nযে কাজ থামলো: " + running_label)
@@ -42752,6 +42760,13 @@ async def handle_callback(query: dict):
                 await send_msg(chat_id, "ℹ️ এই কাজটি ইতিমধ্যে শেষ হয়ে গেছে, তাই এই বাটন আর কার্যকর নয়।")
                 return
             CANCEL_FLAGS[target_chat] = True
+            # 2026-11-27 (user request — same traceability need as
+            # handle_cancel_command above): log uid + button_job_id vs the
+            # job actually running so a duplicate Telegram webhook retry
+            # re-firing an old button tap, or a different admin cancelling,
+            # shows up clearly in logs instead of looking like an unexplained
+            # auto-cancel.
+            logger.warning(f"[Cancel] jobcancel_ button fired for chat_id={target_chat} by uid={uid} (button_job_id={button_job_id}, running_job_id={running_job_id}) — running job was: {ACTIVE_JOB_LABEL.get(target_chat) or 'none'}")
             _active_task = ACTIVE_GEN_TASK.get(target_chat)
             if _active_task and not _active_task.done():
                 _active_task.cancel()  # kill the in-flight API call immediately, don't wait for it to finish naturally
