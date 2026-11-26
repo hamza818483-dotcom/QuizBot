@@ -36301,7 +36301,8 @@ async def qbm_extract_all_pages(
     job_id: str = None,
     no_knowledge_fallback: bool = False,
     skip_lookahead: bool = False,
-    strict_calls: bool = False
+    strict_calls: bool = False,
+    post_call2_hook=None
 ) -> list:
     """
     Phase 1 -- runs the full 3-call connected extraction pipeline for every
@@ -36328,6 +36329,19 @@ async def qbm_extract_all_pages(
     OpenRouter fallback -- used by /unmesh (per user request 2026-09-04:
     /unmesh must never use a non-Gemini model anywhere in its pipeline).
     Every other caller (/qbm, /onu) is unaffected (default False).
+
+    post_call2_hook (opt-in, default None): async callable
+    (mcqs, img, page_num) -> mcqs, run once per page right after this
+    page's final MCQ list is settled (post lookahead/web-resolve, pre
+    page_status finalize) -- lets a caller run its OWN extra per-page AI
+    call/pass on top of the shared 2-call pipeline without touching this
+    function's core logic. /omr (2026-11-27, user request) uses this for
+    its dedicated Call 3 (logical question<->option consistency fix,
+    e.g. a word misread during extraction that doesn't match the given
+    options -- distinct from /qbm's Call2 which only checks the ANSWER,
+    not whether the question's own wording is internally consistent with
+    its options). Every other existing caller passes nothing and is
+    completely unaffected.
 
     job_id (opt-in, default None): when given, each page's finished MCQs
     are persisted to D1 (page_jobs.partial_data) as soon as that page
@@ -36715,6 +36729,11 @@ async def qbm_extract_all_pages(
             if not mcqs and _zero_reason:
                 page_status[idx]["error"] = _zero_reason
 
+        if post_call2_hook and mcqs and not is_cancelled(chat_id):
+            try:
+                mcqs = await post_call2_hook(mcqs, img, page_num)
+            except Exception as e:
+                logger.warning(f"[QBM Extract] Page {page_num} post_call2_hook failed (non-fatal, keeping pre-hook mcqs): {e}")
 
         page_status[idx]["current"] = False
         page_status[idx]["done"] = True
