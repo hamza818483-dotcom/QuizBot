@@ -808,6 +808,36 @@ def _pdf_disk_cache_put(file_unique_id: str, data: bytes) -> None:
     except Exception as e:
         logger.warning(f"[PDF DiskCache] write failed: {e}")
 
+# 2026-11-27 (user request): strip embedded PDF link-annotations (clickable
+# page areas that jump to a URL/other page on tap) from every PDF before it
+# enters ANY command's pipeline (/cut, /qbm, /pdf, /dagano, ...). Hooked at
+# the single shared download point (_download_pdf_cached) so it's automatic
+# everywhere, runs once per unique file, and the stripped bytes are what gets
+# cached (in-memory + disk) -- so re-use via file_id/file_unique_id cache hits
+# also returns already-stripped bytes, no repeat work.
+def _strip_pdf_link_annotations(pdf_bytes: bytes) -> bytes:
+    try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        removed = 0
+        for page in doc:
+            for link in page.get_links():
+                xref = link.get("xref")
+                if xref:
+                    page.delete_link(link)
+                    removed += 1
+        if removed:
+            logger.info(f"[PDF LinkStrip] removed {removed} link annotation(s)")
+            out = doc.tobytes(garbage=3, deflate=True)
+            doc.close()
+            return out
+        doc.close()
+        return pdf_bytes
+    except Exception as e:
+        logger.warning(f"[PDF LinkStrip] failed, using original bytes: {e}")
+        return pdf_bytes
+
+
 async def _download_pdf_cached(file_id: str, progress_cb=None, chat_id: int = None,
                                 message_id: int = None, file_unique_id: str = None) -> bytes:
     cached = _pdf_bytes_cache.get(file_id)
@@ -831,6 +861,7 @@ async def _download_pdf_cached(file_id: str, progress_cb=None, chat_id: int = No
             _pdf_unique_id_index[file_unique_id] = file_id
             return disk_data
     data = await download_tg_file(file_id, progress_cb=progress_cb, chat_id=chat_id, message_id=message_id)
+    data = await asyncio.to_thread(_strip_pdf_link_annotations, data)
     _pdf_bytes_cache_set(file_id, data)
     if file_unique_id:
         _pdf_unique_id_index[file_unique_id] = file_id
