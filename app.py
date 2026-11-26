@@ -36935,26 +36935,28 @@ async def qbm_extract_all_pages(
                 # 2026-11-21: "1 month age system thik chilo" -- restore the
                 # older, simpler ladder instead of the 3-stage one): one page
                 # must never block the whole job forever -- if a single
-                # page's extraction (API hang/dead key/etc.) exceeds 120s
-                # (2 min) on the primary model, retry that SAME page once
-                # forcing gemini-3.1-flash-lite (separate quota bucket,
-                # usually unaffected when gemini-3.6-flash is the one
-                # hanging) with a 40s window. If flash-lite ALSO stalls, the
-                # page is skipped (MUST) and the job moves on to the next
-                # page -- no second primary-model retry stage (primary 120s +
-                # flash-lite 40s = 160s max per page).
-                mcqs = await asyncio.wait_for(ex_task, timeout=120)
+                # page's extraction (API hang/dead key/etc.) exceeds 150s
+                # (2.5 min; bumped from 120s on user request 2026-11-27 --
+                # pages with 45+ MCQ need more genuine processing headroom)
+                # on the primary model, retry that SAME page once forcing
+                # gemini-3.1-flash-lite (separate quota bucket, usually
+                # unaffected when gemini-3.6-flash is the one hanging) with
+                # a 40s window. If flash-lite ALSO stalls, the page is
+                # skipped (MUST) and the job moves on to the next page --
+                # no second primary-model retry stage (primary 150s +
+                # flash-lite 40s = 190s max per page).
+                mcqs = await asyncio.wait_for(ex_task, timeout=150)
             except asyncio.CancelledError:
                 mcqs = []
             except asyncio.TimeoutError:
-                logger.warning(f"[QBM] page {page_num} timed out after 120s on primary model — retrying with gemini-3.1-flash-lite")
+                logger.warning(f"[QBM] page {page_num} timed out after 150s on primary model — retrying with gemini-3.1-flash-lite")
                 ex_task.cancel()
                 try:
                     await ex_task
                 except Exception:
                     pass
                 try:
-                    await send_msg(chat_id, f"⏱️ Page {page_num}: 2 minute-এও শেষ হয়নি — gemini-3.1-flash-lite দিয়ে আবার চেষ্টা করছি।")
+                    await send_msg(chat_id, f"⏱️ Page {page_num}: 2.5 minute-এও শেষ হয়নি — gemini-3.1-flash-lite দিয়ে আবার চেষ্টা করছি।")
                 except Exception as _e:
                     logger.warning(f"[QBM] stall-switch DM notice send_msg failed for page {page_num}: {_e}")
                 # 2026-11-20 (user request): live dashboard should also show
@@ -36965,8 +36967,8 @@ async def qbm_extract_all_pages(
                 # block (_build_dashboard_v, strict_calls=True) reads
                 # "v_now" instead, not "stage" -- setting only "stage" left
                 # the switch invisible in DM (bug found 2026-11-20).
-                page_status[idx]["stage"] = "🔁 2min stall — gemini-3.1-flash-lite দিয়ে retry হচ্ছে..."
-                page_status[idx]["v_now"] = "🔁 2min stall — gemini-3.1-flash-lite দিয়ে retry হচ্ছে..."
+                page_status[idx]["stage"] = "🔁 2.5min stall — gemini-3.1-flash-lite দিয়ে retry হচ্ছে..."
+                page_status[idx]["v_now"] = "🔁 2.5min stall — gemini-3.1-flash-lite দিয়ে retry হচ্ছে..."
                 page_status[idx]["switched_model"] = True
                 if status_msg_id:
                     _spawn_task(_qbm_safe_dash_edit(force=True))
@@ -37257,7 +37259,7 @@ async def qbm_extract_all_pages(
             # discarding already-finished sibling results before the
             # assignment loop below ever runs. With return_exceptions, each
             # task's outcome (value OR exception) comes back individually, so
-            # a stuck/cancelled page (e.g. one stalled in the 120s->40s retry
+            # a stuck/cancelled page (e.g. one stalled in the 150s->40s retry
             # ladder) no longer erases a sibling page that already finished.
             chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
             for res in chunk_results:
