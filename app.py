@@ -31867,6 +31867,308 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
         await _safe_error_reply(chat_id, e)
 
 
+# ============================================================
+# /omr — 2026-11-27 (user request): same extraction pipeline as /qbm
+# (existing-MCQ extractor, never generates new ones) PLUS a dedicated
+# Call 3 (_qbm_call3_logic_consistency) per page: checks every MCQ's
+# question wording is logically consistent with its own options and fixes
+# any word misread during extraction (Call2 only verifies the ANSWER is
+# right, not whether the question's own wording makes sense against its
+# options -- that gap is what Call3 closes). Kept as its own command
+# (not a flag on /qbm) specifically so this extra per-page AI call never
+# runs for /qbm's existing users/jobs -- /qbm's pipeline is completely
+# untouched (post_call2_hook defaults to None there).
+#
+# Page-pair 100-MCQ note (soft check, NOT a retry/blocking rule): OMR
+# sheets are always designed 2-page-per-100-MCQ (page N + N+1 together
+# always hold exactly 100), so after extraction this groups the result
+# into consecutive pairs starting from the first requested page and logs
+# a note in the completion caption for any pair that doesn't total 100 --
+# informational only, never triggers extra retries or blocks the CSV.
+# ============================================================
+
+async def _omr_call3_hook(mcqs: list, img, page_num: int) -> list:
+    return await _qbm_call3_logic_consistency(img, mcqs, gemini_only=True)
+
+
+def _omr_pairwise_100_note(extracted_pages: list) -> str:
+    """extracted_pages: list of (page_num, img, mcqs) IN THE ORDER requested/processed.
+    Groups consecutive pages into pairs (1st+2nd, 3rd+4th, ...) by their
+    actual position in this run (not by raw page number, so e.g. /omr -p
+    4-9 pairs as 4+5, 6+7, 8+9 regardless of numbering gaps) and returns a
+    short note for any pair whose combined MCQ count isn't 100 — "" if
+    every pair is exactly 100 (nothing worth mentioning) or if there's an
+    odd page left over with no partner yet (not a real pair, skipped)."""
+    lines = []
+    n = len(extracted_pages)
+    for i in range(0, n - 1, 2):
+        p1, _, m1 = extracted_pages[i]
+        p2, _, m2 = extracted_pages[i + 1]
+        total = len(m1) + len(m2)
+        if total != 100:
+            lines.append(f"⚠️ Page {p1}+{p2}: মোট {total} MCQ (expected 100)")
+    if not lines:
+        return ""
+    return "\n\n🔍 Page-pair check:\n" + "\n".join(lines)
+
+
+async def handle_omr(msg: dict):
+    uid = msg["from"]["id"]
+    chat_id = msg["chat"]["id"]
+    lock = _get_pdfm_lock(uid)
+    if lock.locked():
+        _PDFM_USER_QUEUE_LEN[uid] = _PDFM_USER_QUEUE_LEN.get(uid, 0) + 1
+        pos = _PDFM_USER_QUEUE_LEN[uid]
+        try:
+            await send_msg(chat_id, f"⏳ আগের PDF/PPT কাজ শেষ হচ্ছে... তোমার এই request queue তে #{pos} নম্বরে আছে, একে একে সব হয়ে যাবে।")
+        except Exception:
+            pass
+    async with lock:
+        _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
+        _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+        try:
+            return await _handle_omr_impl(msg)
+        finally:
+            _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
+
+
+async def _handle_omr_impl(msg: dict):
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    uname = msg["from"].get("first_name", "User")
+    text = msg.get("text", "")
+    reply = msg.get("reply_to_message")
+
+    if not reply or not (reply.get("document") or reply.get("photo")):
+        await send_msg(chat_id,
+            "❌ PDF বা Image-এ reply করে /omr দাও!\n\n"
+            "<b>Format:</b>\n"
+            "<code>/omr -p 4-9 -c @channel -m \"Topic\" -t group_id</code>\n\n"
+            "📌 /qbm-এর মতোই existing MCQ extract করে + extra logic-check pass "
+            "(question-option mismatch word ভুল extract হলে ঠিক করে)\n"
+            "📌 -p = page range, PDF-only (না দিলে সব page)\n"
+            "📌 -c = channel id (না দিলে list দেখাবে)\n"
+            "📌 -m = topic name\n"
+            "📌 -t = topic/thread id (group হলে)"
+        )
+        return
+
+    is_image_reply = bool(reply.get("photo")) or (
+        reply.get("document") and not reply["document"].get("file_name", "").lower().endswith(".pdf")
+        and (reply["document"].get("mime_type", "").startswith("image/"))
+    )
+
+    if reply.get("document") and not is_image_reply and not reply["document"].get("file_name", "").lower().endswith(".pdf"):
+        await send_msg(chat_id, "❌ শুধু PDF বা Image file support করে!")
+        return
+
+    params = _parse_pdfm_params(text)
+    topic = params["topic"] or "🌟ATLAS Question Bank"
+    page_range = params["page_range"]
+    channel_id = params["channel_id"]
+    thread_id = params["thread_id"]
+
+    if is_image_reply:
+        if reply.get("photo"):
+            file_id = reply["photo"][-1]["file_id"]
+            file_unique_id = reply["photo"][-1].get("file_unique_id")
+        else:
+            file_id = reply["document"]["file_id"]
+            file_unique_id = reply["document"].get("file_unique_id")
+        file_name = reply.get("document", {}).get("file_name", "image.jpg")
+    else:
+        file_id = reply["document"]["file_id"]
+        file_unique_id = reply["document"].get("file_unique_id")
+        file_name = reply["document"].get("file_name", "document.pdf")
+
+    _is_cache_hit = (not is_image_reply) and (
+        file_id in _pdf_bytes_cache
+        or (file_unique_id and _pdf_unique_id_index.get(file_unique_id) in _pdf_bytes_cache)
+    )
+    status_r = await send_msg(chat_id, ("✅ Cached PDF ব্যবহার হচ্ছে...\n📄 " + file_name) if _is_cache_hit else
+        ("⏳ " + ("Image" if is_image_reply else "PDF") + f" download হচ্ছে...\n📄 {file_name}\n[░░░░░░░░░░ 0%]"))
+    status_msg_id = status_r.get("result", {}).get("message_id")
+    if status_msg_id and not _is_cache_hit:
+        _spawn_task(edit_msg(chat_id, status_msg_id,
+            "⏳ " + ("Image" if is_image_reply else "PDF") + f" download হচ্ছে...\n📄 {file_name}\n[░░░░░░░░░░ 0%]",
+            reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
+
+    _last_pct = {"v": -1}
+    _dl_start = time.time()
+    def _dl_progress_pdf(done, total):
+        if not status_msg_id or not total:
+            return
+        pct = int(done * 100 / total)
+        if pct - _last_pct["v"] < 10 and pct != 100:
+            return
+        _last_pct["v"] = pct
+        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+        label = "Image" if is_image_reply else "PDF"
+        elapsed = time.time() - _dl_start
+        eta_txt = ""
+        if pct > 0 and pct < 100:
+            eta_s = int(elapsed * (100 - pct) / pct)
+            eta_txt = f" | ETA {eta_s}s"
+        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ {label} download হচ্ছে...\n📄 {file_name}\n[{bar} {pct}%{eta_txt}]",
+                             reply_markup=_dlcancel_kb(chat_id, status_msg_id)))
+
+    _dl_progress_pdf_wrapped = _wrap_dl_progress_cb(chat_id, status_msg_id, _dl_progress_pdf) if status_msg_id else _dl_progress_pdf
+    try:
+        if is_image_reply:
+            img_bytes = await download_tg_file(file_id, progress_cb=_dl_progress_pdf_wrapped, chat_id=chat_id, message_id=reply["message_id"])
+            from PIL import Image as PILImage
+            img = PILImage.open(BytesIO(img_bytes))
+            pages = [(1, img)]
+        else:
+            pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress_pdf_wrapped, chat_id=chat_id,
+                                                    message_id=reply["message_id"], file_unique_id=file_unique_id)
+            ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range, False)
+            if not ok:
+                await send_msg(chat_id, pages)
+                return
+
+            if not pages:
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id, "🔍 OCR Scanning (scanned PDF detected)...")
+                try:
+                    from pdf2image import convert_from_bytes
+                    if page_range:
+                        parts = str(page_range).split("-")
+                        first = int(parts[0])
+                        last = int(parts[1]) if len(parts) > 1 else first
+                        ocr_images = await asyncio.to_thread(
+                            convert_from_bytes, pdf_bytes, dpi=150, first_page=first, last_page=last, use_cropbox=True
+                        )
+                        pages = list(zip(range(first, last + 1), ocr_images))
+                    else:
+                        ocr_images = await asyncio.to_thread(convert_from_bytes, pdf_bytes, dpi=150, use_cropbox=True)
+                        pages = list(enumerate(ocr_images, 1))
+                except Exception as e:
+                    logger.warning(f"[OMR] OCR fallback failed: {e}")
+
+        if not pages:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ Page পাওয়া যায়নি!")
+            return
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Extraction শুরু হচ্ছে (Call1+Call2+Call3)...")
+
+        _omr_extract_job_id = None
+        if file_id and not is_image_reply and len(pages) > 1:
+            _omr_extract_job_id = gen_session_id()
+            await db_save_page_job(
+                _omr_extract_job_id, job_type="qbm_extract", uid=uid, chat_id=chat_id, uname=uname,
+                file_id=file_id, page_range=page_range or "", topic=topic,
+                mcq_count="", channel_id=str(channel_id or ""),
+                csv_only=0, file_name=file_name, thread_id=thread_id or 0,
+                status_msg_id=status_msg_id or 0, resume_page_num=pages[0][0],
+                status="running"
+            )
+
+        extracted_pages = await qbm_extract_all_pages(
+            chat_id, pages, topic, file_name, status_msg_id, file_id=file_id, gemini_only=True,
+            job_id=_omr_extract_job_id, post_call2_hook=_omr_call3_hook
+        )
+
+        if _omr_extract_job_id:
+            await db_finish_page_job(_omr_extract_job_id)
+
+        if is_cancelled(chat_id):
+            total_mcq_found = sum(len(mcqs) for _, _, mcqs in extracted_pages)
+            if total_mcq_found:
+                import io as _io_qc, csv as _csv_qc
+                _buf_qc = _io_qc.StringIO()
+                _w_qc = _csv_qc.writer(_buf_qc)
+                _w_qc.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
+                                  "answer", "explanation", "type", "section"])
+                _ans_map_qc = {"A": "1", "B": "2", "C": "3", "D": "4"}
+                for _, _, mcqs in extracted_pages:
+                    for m in mcqs:
+                        opts = m.get("options", ["", "", "", ""])
+                        _w_qc.writerow([
+                            m.get("question", ""), opts[0] if len(opts) > 0 else "",
+                            opts[1] if len(opts) > 1 else "", opts[2] if len(opts) > 2 else "",
+                            opts[3] if len(opts) > 3 else "", opts[4] if len(opts) > 4 else "",
+                            _ans_map_qc.get(m.get("answer", "A"), "1"),
+                            _strip_img_tag(m.get("explanation", "")), "1", "1"
+                        ])
+                await send_document(chat_id, _buf_qc.getvalue().encode("utf-8"),
+                    f"{topic}_OMR_cancelled.csv",
+                    caption=f"🛑 Cancel করা হয়েছে — ততক্ষণে extract হওয়া {total_mcq_found} MCQ CSV আকারে পাঠানো হলো।",
+                    mime_type="text/csv")
+            else:
+                await send_msg(chat_id,
+                    "✅ Cancel করা হয়েছে — তখনো কোনো page সম্পূর্ণ extract হয়নি, তাই পাঠানোর মতো কোনো CSV নেই।",
+                    reply_to_message_id=status_msg_id)
+            return
+
+        _pair_note = _omr_pairwise_100_note(extracted_pages)
+
+        if not channel_id:
+            channels = await db_get_channels()
+            if not channels:
+                await process_qbm_pages(chat_id, uid, uname, extracted_pages, topic,
+                    channel_id, True, file_name, status_msg_id, thread_id, skip_extract=True)
+                return
+
+            app.state.qbm_cache = getattr(app.state, "qbm_cache", {})
+            app.state.qbm_cache[f"qbm_img_{uid}"] = extracted_pages
+            _cap_page_cache(app.state.qbm_cache)
+            await sb_exec(lambda: sb.table("quiz_sessions").upsert({
+                "key": f"qbm_pending_{uid}",
+                "data": json.dumps({
+                    "topic": topic, "file_name": file_name,
+                    "status_msg_id": status_msg_id, "thread_id": thread_id,
+                    "file_id": file_id, "page_range": page_range
+                }),
+                "updated_at": int(time.time())
+            }).execute())
+
+            total_mcq_found = sum(len(mcqs) for _, _, mcqs in extracted_pages)
+
+            if total_mcq_found:
+                import io as _io_omr, csv as _csv_mod_omr
+                _buf_omr = _io_omr.StringIO()
+                _w_omr = _csv_mod_omr.writer(_buf_omr)
+                _w_omr.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
+                                  "answer", "explanation", "type", "section"])
+                _ans_map_omr = {"A": "1", "B": "2", "C": "3", "D": "4"}
+                for _, _, mcqs in extracted_pages:
+                    for m in mcqs:
+                        opts = m.get("options", ["", "", "", ""])
+                        _w_omr.writerow([
+                            m.get("question", ""), opts[0] if len(opts) > 0 else "",
+                            opts[1] if len(opts) > 1 else "", opts[2] if len(opts) > 2 else "",
+                            opts[3] if len(opts) > 3 else "", opts[4] if len(opts) > 4 else "",
+                            _ans_map_omr.get(m.get("answer", "A"), "1"),
+                            _strip_img_tag(m.get("explanation", "")), "1", "1"
+                        ])
+                _csv_kb = {"inline_keyboard": [[{
+                    "text": "📋 Channel List",
+                    "callback_data": f"qbmch_showlist_{uid}"
+                }]]}
+                _omr_all_mcqs_flat = [m for _, _, mcqs in extracted_pages for m in mcqs]
+                await send_document(chat_id, _buf_omr.getvalue().encode("utf-8"),
+                    f"{topic}_OMR.csv",
+                    caption=f"📋 {topic} — {total_mcq_found} MCQ (Extracted){_model_caption_line(_omr_all_mcqs_flat)}{_pair_note}",
+                    mime_type="text/csv",
+                    reply_markup=_csv_kb)
+            elif is_cancelled(chat_id):
+                await send_msg(chat_id, "✅Cancelled", reply_to_message_id=status_msg_id)
+            return
+
+        await process_qbm_pages(chat_id, uid, uname, extracted_pages, topic,
+            channel_id, False, file_name, status_msg_id, thread_id, skip_extract=True)
+
+    except _DownloadCancelled:
+        await _dl_cancel_cleanup(chat_id, status_msg_id)
+    except Exception as e:
+        logger.error(f"[OMR] Error: {e}", exc_info=True)
+        await _safe_error_reply(chat_id, e)
+
+
 async def _post_topic_groups_to_channel(channel_id, topic_groups: list, thread_id: int = None):
     """Posts topic_groups (from _topic_group_mcqs / _unmesh_group_mcqs) as
     live Telegram polls directly to a channel — one header message per
@@ -41466,6 +41768,11 @@ async def handle_message(msg: dict):
         # /qbm = Question Bank Maker — EXTRACTS existing MCQ from PDF (never generates new)
         # 100% ported from AtlasMasterBot's qbm_handler
         _spawn_command_task(uid, handle_qbm(msg))
+    elif text.startswith("/omr"):
+        # /omr = same extraction pipeline as /qbm + dedicated Call3 logic-
+        # consistency pass (question<->option word-mismatch fix) + page-pair
+        # 100-MCQ soft-check note in the completion caption (2026-11-27)
+        _spawn_command_task(uid, handle_omr(msg))
     elif text.startswith("/onu2"):
         # /onu2 = RED-BOX REGION extraction (single or grouped MCQs inside a
         # red box/rectangle), cross-checked against উত্তরমালা answer-key if present
