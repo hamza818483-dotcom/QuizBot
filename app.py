@@ -28756,13 +28756,18 @@ Output ONLY the full corrected JSON array, all fixes applied, same length/order 
 # MCQ count on that page.
 async def _qbm_call3_logic_consistency(img, mcqs: list, gemini_only: bool = False) -> list:
     """
-    CALL 3 (single chunk, /omr only) — for every MCQ, check whether the
-    question's wording is LOGICALLY CONSISTENT with its own 4 options (not
-    whether the answer is right -- Call2 already handles that). If a
-    specific word in the question was misread during extraction (common
-    cause: that word was blurry/unclear on the source page) and the options
-    make clear what it should actually say, correct ONLY that word -- never
-    rewrite anything else, never touch an MCQ that's already consistent.
+    CALL 3 (single chunk, /omr only) — for every MCQ, check TWO things:
+    (a) is the question's wording LOGICALLY CONSISTENT with its own 4
+    options (a misread word on the page), and (b) is the MARKED ANSWER
+    actually the option that is scientifically/factually correct given the
+    (possibly now-corrected) question and options. (a) was the original
+    scope; (b) was added 2026-11-27 (user report) because a real-world case
+    slipped through: question+options were each individually fine, but
+    Call2's answer-verification pass had picked the wrong option for a
+    physics-reasoning reason (e.g. mixing up which quantity a phase
+    difference is between) -- a bug that pure question-wording checking
+    structurally cannot catch, since it never looks at whether the answer
+    itself is right.
     """
     if not mcqs:
         return mcqs
@@ -28776,9 +28781,9 @@ async def _qbm_call3_logic_consistency(img, mcqs: list, gemini_only: bool = Fals
         prompt = f"""You are given MCQs already extracted from this exact page image:
 {mcq_json}
 
-TASK — LOGICAL CONSISTENCY CHECK ONLY (do not touch the answer, do not re-verify against the
-page's marked answer -- that was already done in a separate pass):
+TASK — TWO-PART FINAL CONSISTENCY CHECK:
 
+PART A — QUESTION WORDING vs OPTIONS:
 For EACH MCQ, check whether the QUESTION's wording is logically/conceptually consistent with its
 own 4 OPTIONS. A page image can have a blurry/unclear word that got misread during extraction --
 when that happens, the question ends up talking about one concept/quantity while the options only
@@ -28794,29 +28799,32 @@ Another kind: a definition-style question names the wrong physical quantity/devi
 where the options are clearly definitions of something else, printing that something else's name
 makes the question internally sensible.
 
-STEPS per MCQ:
-1) Read the question and all 4 options together. Ask: holistically, does this question's wording
-   make sense GIVEN these specific options -- or would a different word in the question turn this
-   into an obviously coherent, answerable MCQ?
-2) If something seems off, go back to the actual page IMAGE and re-read that specific part of the
-   question very carefully, character by character if needed, especially any word that could have
-   been visually unclear/blurry/cut off, to find the ACTUAL word that was already there on the page.
-3) If, after re-reading the image, you find the real on-page word is different from what Call 1
-   extracted (confirming it was a misread, not an actual wording choice) AND using it instead
-   makes the question logically consistent with the options above -- correct ONLY that misread
-   word/phrase in the question text. Never invent a word that is not actually on the page just
-   because it would be "more consistent" -- the correction must be grounded in what the image
-   actually shows, re-confirmed by careful re-reading, not guessed from the options alone.
-4) If the question is already consistent with its options, or you cannot confirm an actual
-   different word on the page even after careful re-reading, leave that MCQ's question text
-   completely untouched -- do not force a change.
-5) Never touch options, answer, or any other field. Never reorder the list. Only the "question"
-   field of specific MCQs (very rarely: a less common option-text misread of the same kind) may
-   change.
+Steps: 1) Read the question + all 4 options together -- does the wording make sense GIVEN these
+specific options? 2) If something seems off, re-read that part of the question on the actual page
+IMAGE very carefully (character by character if needed) to find the ACTUAL word on the page.
+3) Only correct the question text if you can confirm, from the image, a different actual word was
+there -- never invent a word just because it would be "more consistent" with the options alone.
+4) If already consistent, or you can't confirm a different on-page word, leave the question
+untouched.
+
+PART B — IS THE MARKED ANSWER ACTUALLY CORRECT:
+Using the question (after any Part A correction) and its 4 options, work out independently which
+option is the scientifically/mathematically/factually correct answer. This is a genuine re-derivation,
+not a rubber-stamp of the given "answer" field -- actually solve/reason it out.
+- If your independently-derived correct option DIFFERS from the given "answer", and you are
+  confident in your own derivation (re-check your reasoning once before concluding this), set
+  "answer" to the correct option's letter/number in the SAME format the input used (e.g. if input
+  answers are "1"/"2"/"3"/"4", output that same style) and set "answer_changed": true.
+- If the given answer already matches your own independent derivation, or you are not fully
+  confident which option is truly correct, leave "answer" exactly as given and set
+  "answer_changed": false. Do NOT change an answer on a mere hunch -- only when you can clearly
+  derive the correct option yourself.
+- Never touch options or any other field. Never reorder the list.
 
 Output ONLY a JSON array covering every "i" index from the input above, same order, in this
-format -- include ALL MCQs even if unchanged for them, just repeat the field as given:
-[{{"i":0,"question":"...","changed":false}},{{"i":1,"question":"...(corrected)...","changed":true}}]"""
+format -- include ALL MCQs even if unchanged for them, just repeat each field as given:
+[{{"i":0,"question":"...","changed":false,"answer":"2","answer_changed":false}},
+ {{"i":1,"question":"...(corrected)...","changed":true,"answer":"4","answer_changed":true}}]"""
 
         gem_txt = await _qbm_gemini_raw(img, prompt, gemini_only=gemini_only)
         raw = _qbm_parse_bare_json_array(gem_txt) if gem_txt else []
@@ -28824,6 +28832,7 @@ format -- include ALL MCQs even if unchanged for them, just repeat the field as 
             return mcqs
 
         fixed_count = 0
+        answer_fixed_count = 0
         for entry in raw:
             try:
                 i = entry.get("i")
@@ -28834,10 +28843,18 @@ format -- include ALL MCQs even if unchanged for them, just repeat the field as 
                     if new_q and new_q != mcqs[i].get("question", ""):
                         mcqs[i]["question"] = new_q
                         fixed_count += 1
+                if entry.get("answer_changed") and entry.get("answer") not in (None, ""):
+                    new_ans = str(entry["answer"]).strip()
+                    old_ans = str(mcqs[i].get("answer", "")).strip()
+                    if new_ans and new_ans != old_ans:
+                        mcqs[i]["answer"] = new_ans
+                        answer_fixed_count += 1
             except Exception:
                 continue
         if fixed_count:
             logger.info(f"[OMR Call3] fixed {fixed_count} logically-inconsistent question(s) on this page")
+        if answer_fixed_count:
+            logger.info(f"[OMR Call3] corrected {answer_fixed_count} wrong marked answer(s) on this page (independent re-derivation)")
         return mcqs
     except Exception as e:
         logger.warning(f"[OMR Call3] failed, keeping pre-Call3 mcqs: {e}")
