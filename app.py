@@ -37252,8 +37252,22 @@ async def qbm_extract_all_pages(
                 _extract_one_slotted(i, start + i, page_num, img)
                 for i, (page_num, img) in enumerate(chunk)
             ]
-            chunk_results = await asyncio.gather(*tasks)
-            for idx, page_num, img, mcqs in chunk_results:
+            # return_exceptions=True is the actual fix: plain gather() aborts
+            # the WHOLE chunk the instant ANY one task raises/cancels,
+            # discarding already-finished sibling results before the
+            # assignment loop below ever runs. With return_exceptions, each
+            # task's outcome (value OR exception) comes back individually, so
+            # a stuck/cancelled page (e.g. one stalled in the 120s->40s retry
+            # ladder) no longer erases a sibling page that already finished.
+            chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
+            for res in chunk_results:
+                if isinstance(res, BaseException):
+                    if isinstance(res, asyncio.CancelledError):
+                        logger.warning(f"[QBM] a page in this window was cancelled mid-extraction; keeping its siblings' already-finished results instead of discarding the whole chunk")
+                    else:
+                        logger.error(f"[QBM] a page in this window errored mid-extraction (keeping siblings): {res}")
+                    continue
+                idx, page_num, img, mcqs = res
                 results[idx] = (page_num, img, mcqs)
     except asyncio.CancelledError:
         logger.warning(f"[QBM] extraction hard-cancelled mid-window -- keeping {sum(1 for r in results if r is not None)}/{len(pages)} already-finished page(s), returning partial results instead of aborting")
