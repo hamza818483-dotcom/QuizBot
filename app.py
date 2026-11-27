@@ -121,7 +121,8 @@ from pdf_handler import (
     generate_new_mcq, generate_mcq_from_text, parse_pdf_command, parse_page_range,
     fmt_page, gen_session_id, get_random_ayat, get_motivation,
     key_rotator, crop_explanation_image, get_pdf_page_count,
-    _PDF_MAX_PAGES_PER_CALL, _enhance_blurry_page
+    _PDF_MAX_PAGES_PER_CALL, _enhance_blurry_page,
+    generate_pdfs_topic_mcqs, _pdfs_call2_generate_mcqs
 )
 
 from core import (
@@ -2609,6 +2610,66 @@ async def lms_send_channel_pagewise(request: Request):
     asyncio.create_task(_lms_job_db_write(job_id, LMS_SEND_JOBS[job_id]))
     _spawn_task(_run_lms_pagewise_send_job(job_id, channel_id, thread_id, pages, book_title))
     return JSONResponse({"ok": True, "job_id": job_id})
+
+
+@app.post("/api/book-topic-mcqs")
+async def book_topic_mcqs(request: Request):
+    """
+    Shared Call1+Call2 endpoint (RAG_TOPICWISE_MCQ_PLAN.md plan step 4) --
+    both QuizBot's own /pdfs flow and LMS-1's book_topics pipeline
+    (confirmed topic from the admin's one-time preview, see book_topics
+    table + PagewiseMCQ.tsx Topics tab) call this so the Call1/Call2 AI
+    logic lives in exactly one place. Body: {
+      secret, image_base64, mime_type?, topic, page, mcq_count_hint?,
+      detected_topics?  // optional: skip Call1 if caller already has it
+                        // (e.g. LMS's confirmed book_topics row -- in that
+                        // case pass [{"main_topic": name, "sub_topic": null}])
+    }
+    Returns: { ok, mcqs: [...] } -- same flat MCQ-dict shape
+    generate_pdfs_topic_mcqs already returns internally (each tagged with
+    _pdfs_topic/_pdfs_subtopic via _pdfs_reconcile_mcq_topics).
+    """
+    if not LMS_API_SECRET:
+        logger.warning("[BookTopicMcqs] SECURITY: LMS_API_SECRET not set -- endpoint accepting unauthenticated requests!")
+    data = await request.json()
+    if LMS_API_SECRET and data.get("secret") != LMS_API_SECRET:
+        return JSONResponse({"error": "unauthorized"}, status_code=403)
+
+    image_b64 = data.get("image_base64") or ""
+    topic = str(data.get("topic") or "").strip()
+    page = int(data.get("page") or 1)
+    mcq_count_hint = int(data.get("mcq_count_hint") or 15)
+    caller_topics = data.get("detected_topics")
+
+    if not image_b64:
+        return JSONResponse({"error": "image_base64 is required"}, status_code=400)
+    if not topic:
+        return JSONResponse({"error": "topic is required"}, status_code=400)
+
+    try:
+        img_bytes = base64.b64decode(image_b64)
+        img = PILImage.open(BytesIO(img_bytes))
+    except Exception as e:
+        return JSONResponse({"error": f"invalid image_base64: {e}"}, status_code=400)
+
+    try:
+        if caller_topics:
+            # Caller (LMS, from an already-confirmed book_topics row) supplies
+            # the topic directly -- skip Call1, go straight to Call2 so the
+            # admin's confirmed heading/range is what actually grounds the MCQs.
+            normalized = [
+                {"main_topic": (t.get("main_topic") or topic)[:60],
+                 "sub_topic": (t.get("sub_topic") or None)}
+                for t in caller_topics if isinstance(t, dict)
+            ] or [{"main_topic": topic, "sub_topic": None}]
+            mcqs = await _pdfs_call2_generate_mcqs(img, normalized, page, mcq_count_hint, topic)
+        else:
+            mcqs = await generate_pdfs_topic_mcqs(img, topic, page, mcq_count_hint)
+    except Exception as e:
+        logger.error(f"[BookTopicMcqs] page {page} topic={topic!r} failed: {e}", exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=502)
+
+    return JSONResponse({"ok": True, "mcqs": mcqs})
 
 
 @app.post("/api/mhtml-to-csv")
