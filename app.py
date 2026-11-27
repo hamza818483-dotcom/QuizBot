@@ -2466,6 +2466,151 @@ async def lms_send_channel_active_by_exam(exam_id: str):
     return JSONResponse({"ok": True, "job_id": None})
 
 
+async def _run_lms_pagewise_send_job(job_id: str, channel_id: str, thread_id: int, pages: list, book_title: str = ""):
+    """pages: [{"page_number": int, "image_url": str, "mcqs": [{question,
+    options[4], answer, explanation}, ...]}, ...], sent in list order.
+
+    Per page: the page image is sent DIRECTLY by its R2 URL (LMS mulboi
+    already has pre-rendered page_image_urls -- no local PDF render/bytes
+    needed, unlike the /pdf autosend flow). That image's message_id is then
+    used as reply_to_message_id for every poll of that page -- same
+    image-then-reply-polls pattern as the PDF autosend job (see
+    _run_autosend_pdf-style loop ~L21975/22007 above): one retry-guaranteed
+    photo send, then each MCQ as a quiz poll replying to it.
+
+    Deliberately a separate job function + route from
+    /api/lms-send-channel (exam/topic-wise batches) because the input shape
+    is fundamentally different (page-keyed with an image per page, not a
+    topic-keyed MCQ batch) -- but it reuses the SAME LMS_SEND_JOBS dict, so
+    the existing /status, /cancel generic-by-job_id endpoints work for this
+    job unchanged; no new status/cancel routes needed.
+    """
+    job = LMS_SEND_JOBS[job_id]
+    try:
+        is_admin, admin_err = await _check_bot_admin(channel_id)
+        if not is_admin:
+            job["status"] = "error"
+            job["error"] = admin_err
+            asyncio.create_task(_lms_job_db_write(job_id, job))
+            return
+        job["status"] = "running"
+        asyncio.create_task(_lms_job_db_write(job_id, job))
+
+        if not thread_id:
+            auto_thread_id = await _create_forum_topic(channel_id, book_title or "Mulboi Pagewise")
+            if auto_thread_id:
+                thread_id = auto_thread_id
+
+        for page in pages:
+            if job.get("cancel_requested"):
+                break
+            page_num = page.get("page_number")
+            image_url = page.get("image_url")
+            mcqs = page.get("mcqs") or []
+
+            image_msg_id = None
+            if image_url:
+                photo_data = {
+                    "chat_id": channel_id,
+                    "photo": image_url,
+                    "caption": f"🟥ATLAS Mulboi\n▬▬▬▬▬▬▬▬▬▬\n🌟Page No: {page_num}",
+                }
+                if thread_id:
+                    photo_data["message_thread_id"] = thread_id
+                photo_r = {"ok": False}
+                for _attempt in range(3):
+                    photo_r = await tg_post("sendPhoto", photo_data)
+                    if photo_r.get("ok"):
+                        break
+                    logger.warning(f"[LMS-Pagewise] page {page_num} image attempt {_attempt+1} failed: {photo_r.get('description') or photo_r.get('error')}")
+                    await asyncio.sleep(2)
+                if photo_r.get("ok"):
+                    image_msg_id = photo_r["result"]["message_id"]
+                else:
+                    logger.warning(f"[LMS-Pagewise] page {page_num}: image send gave up, polls will go without reply target")
+
+            for i, mcq in enumerate(mcqs):
+                if job.get("cancel_requested"):
+                    break
+                opts = mcq.get("options", [])[:4]
+                ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(str(mcq.get("answer", "A")).strip().upper(), 0)
+                poll_r = {"ok": False}
+                for _attempt in range(3):
+                    poll_r = await send_poll(
+                        channel_id, mcq.get("question", ""), opts, ans_idx,
+                        explanation=mcq.get("explanation", ""),
+                        reply_to_message_id=image_msg_id,
+                        message_thread_id=thread_id,
+                    )
+                    if poll_r.get("ok"):
+                        break
+                    logger.warning(f"[LMS-Pagewise] page {page_num} MCQ {i+1} attempt {_attempt+1} failed: {poll_r.get('description') or poll_r.get('error')}")
+                    await asyncio.sleep(2)
+                if poll_r.get("ok"):
+                    job["sent_total"] = job.get("sent_total", 0) + 1
+                # Telegram allows ~1 message/sec to the same chat.
+                await asyncio.sleep(1.1)
+
+            job["batches_done"] = job.get("batches_done", 0) + 1
+            job["pct"] = int(job["batches_done"] * 100 / job.get("batches_total", 1))
+            asyncio.create_task(_lms_job_db_write(job_id, job))
+
+        job["status"] = "cancelled" if job.get("cancel_requested") else "done"
+        job["pct"] = 100
+        asyncio.create_task(_lms_job_db_write(job_id, job))
+    except Exception as e:
+        logger.error(f"[LMS-Pagewise] job {job_id} failed: {e}", exc_info=True)
+        job["status"] = "error"
+        job["error"] = str(e)
+        asyncio.create_task(_lms_job_db_write(job_id, job))
+
+
+@app.post("/api/lms-send-channel-pagewise")
+async def lms_send_channel_pagewise(request: Request):
+    """
+    LMS mulboi (pagewise) admin panel 'Telegram-e pathao' button hit korle
+    ekhane ashe (via supabase/functions/quizbot-proxy, needs this path
+    added to its ALLOWED_PATHS). Body: {
+      secret, channel_id, thread_id?, book_title?,
+      pages: [{ page_number, image_url, mcqs: [{question, options[4],
+      answer, explanation}] }, ...]
+    }
+    image_url = book_pdfs.page_image_urls[page_number-1] (R2, already
+    public) -- LMS side builds this `pages` list from book_pdfs +
+    book_page_mcqs before calling. thread_id blank -> ONE forum topic
+    (book_title) auto-created and reused for every page, same as
+    /api/lms-send-channel's exam-title auto-thread behavior.
+    """
+    if not LMS_API_SECRET:
+        logger.warning("[LMS-Pagewise] SECURITY: LMS_API_SECRET not set -- endpoint accepting unauthenticated requests!")
+    data = await request.json()
+    if LMS_API_SECRET and data.get("secret") != LMS_API_SECRET:
+        return JSONResponse({"error": "unauthorized"}, status_code=403)
+
+    channel_id = str(data.get("channel_id") or "").strip()
+    thread_id = data.get("thread_id")
+    thread_id = int(thread_id) if thread_id else None
+    pages = data.get("pages") or []
+    book_title = str(data.get("book_title") or "").strip()
+
+    if not channel_id:
+        return JSONResponse({"error": "channel_id is required"}, status_code=400)
+    if not pages or not any(p.get("mcqs") for p in pages):
+        return JSONResponse({"error": "pages (with mcqs) is required"}, status_code=400)
+
+    total_q = sum(len(p.get("mcqs") or []) for p in pages)
+    job_id = gen_session_id()
+    LMS_SEND_JOBS[job_id] = {
+        "status": "queued", "pct": 0, "sent_total": 0, "total": total_q,
+        "batches_done": 0, "batches_total": len(pages), "error": None,
+        "exam_id": "", "cancel_requested": False,
+        "started_at": time.time(), "topics_done": [],
+    }
+    asyncio.create_task(_lms_job_db_write(job_id, LMS_SEND_JOBS[job_id]))
+    _spawn_task(_run_lms_pagewise_send_job(job_id, channel_id, thread_id, pages, book_title))
+    return JSONResponse({"ok": True, "job_id": job_id})
+
+
 @app.post("/api/mhtml-to-csv")
 async def mhtml_to_csv(file: UploadFile = File(...), secret: str = Form("")):
     """LMS ExamForm 'CSV আপলোড করুন' card: saved chorcha.net/Testmoz .mhtml
