@@ -2653,10 +2653,19 @@ async def book_topic_mcqs(request: Request):
         return JSONResponse({"error": f"invalid image_base64: {e}"}, status_code=400)
 
     try:
-        if caller_topics:
-            # Caller (LMS, from an already-confirmed book_topics row) supplies
-            # the topic directly -- skip Call1, go straight to Call2 so the
-            # admin's confirmed heading/range is what actually grounds the MCQs.
+        # Part 11: boundary detection (LMS's book-topics-detect) now runs on pure
+        # image embeddings with no OCR/text step, so it can only hand back a page
+        # RANGE, not a real name -- `topic` here is just a generic placeholder like
+        # "Topic 1 (p5-12)". An admin may have already renamed it in the Topics tab
+        # (status='confirmed'/'edited') before calling this, in which case `topic`
+        # IS the real, trusted name and should be used as-is, same as before.
+        # Only still-generic placeholder names need Call1 to look at the image and
+        # suggest a real one; a caller_topics entry whose main_topic looks custom
+        # (not the auto placeholder shape) is trusted and skips Call1 as before.
+        is_placeholder = bool(re.match(r"^Topic \d+ \(p\d+-\d+\)$", topic))
+        if caller_topics and not is_placeholder:
+            # Admin-confirmed name from LMS -- skip Call1, go straight to Call2 so
+            # the admin's own heading/range is what actually grounds the MCQs.
             normalized = [
                 {"main_topic": (t.get("main_topic") or topic)[:60],
                  "sub_topic": (t.get("sub_topic") or None)}
@@ -2664,6 +2673,9 @@ async def book_topic_mcqs(request: Request):
             ] or [{"main_topic": topic, "sub_topic": None}]
             mcqs = await _pdfs_call2_generate_mcqs(img, normalized, page, mcq_count_hint, topic)
         else:
+            # No trustworthy name yet (QuizBot's own /pdfs flow, or an
+            # LMS placeholder that was never renamed) -- Call1 looks at the
+            # actual page image and detects a real topic/sub-topic name itself.
             mcqs = await generate_pdfs_topic_mcqs(img, topic, page, mcq_count_hint)
     except Exception as e:
         logger.error(f"[BookTopicMcqs] page {page} topic={topic!r} failed: {e}", exc_info=True)
