@@ -41568,7 +41568,7 @@ async def handle_message(msg: dict):
                 or _dmime.startswith("text/")
             )
         )
-        if not _is_html_like and not _dfn.endswith((".csv", ".tsv")) and _dmime not in ("text/csv", "text/tab-separated-values"):
+        if not _is_html_like and not _dfn.endswith((".pdf", ".csv", ".tsv")) and _dmime not in ("application/pdf", "text/csv", "text/tab-separated-values"):
             # Browser "direct download" files often arrive with no extension
             # at all, or a wrong/stripped one (e.g. just "page", "download",
             # ".bin") and a generic mime (application/octet-stream) -- peek
