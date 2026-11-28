@@ -41604,22 +41604,6 @@ async def handle_message(msg: dict):
             return
 
 
-    # Plain PDF upload, no command/reply, no other mode matched it above —
-    # previously silently ignored (bot gave zero response). Tell the user
-    # how to actually use it instead of leaving them hanging.
-    if msg.get("document") and not msg.get("reply_to_message") and not text \
-            and uid not in WATERMARK_PENDING:
-        _doc2 = msg["document"]
-        _dfn2 = (_doc2.get("file_name") or "").lower()
-        _dmime2 = (_doc2.get("mime_type") or "").lower()
-        if _dfn2.endswith(".pdf") or _dmime2 == "application/pdf":
-            await send_msg(
-                chat_id,
-                "✅ PDF পেয়েছি।\n\nএই PDF-এ <b>reply</b> করে command দাও, যেমন:\n"
-                "<code>/pdf</code>, <code>/rd</code>, <code>/qbm</code> ইত্যাদি।",
-            )
-            return
-
     # v1.2: Watermark flow check (awaiting PDF, then awaiting text)
     if uid in WATERMARK_PENDING:
         consumed = await handle_watermark_document(msg)
